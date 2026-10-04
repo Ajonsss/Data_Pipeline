@@ -33,7 +33,12 @@ The extraction will run **daily at 12:00 AM**. It may also be manually triggered
 
 
 ### 4. Extraction Scope
-
+**The extraction process will retrieve all relevant records from the following EduLITE MongoDB collections:**
+**Students** – student information such as student ID, name, grade level, and section.
+**Sections** – section information such as section ID, section name, and grade level.
+**Subjects** – subject information such as subject ID, subject name, and grade level.
+**Assessments** – assessment information such as assessment ID, subject, assessment type, and assessment date.
+**Assessment Scores** – student assessment results such as student ID, assessment ID, score, and total score.
 
 ### 5. Source Limitations and Assumptions
 **Schema Changes:**

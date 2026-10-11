@@ -55,3 +55,25 @@ The extraction assumes that the required collections and fields exist and contai
 
 **Source Connectivity:**
 Temporary network or MongoDB Atlas connection problems may interrupt the extraction process.
+
+## 2. Source Tables and Column Specifications
+
+# Descriptive Analytics
+
+## Table Name: Class Average Scores
+
+| ID | Grade | Section | Student Name | Student Grade | Class Subject | Class Average Scores |
+
+## Table Name: Class Performance Summaries
+
+| ID | Grade | Section | Student Name | Student Grade | Class Subject | Class Performance Average |
+
+# Predictive Analytics
+
+## Table Name: Student At Risk of Low Performance
+
+| ID | Student Name | Class Subject | Section | Grade Level | Student Average Score |
+
+## Table Name: Students Likely To Achieve High Performance
+
+| ID | Student Name | Class Subject | Section | Grade Level | Student Average Score |

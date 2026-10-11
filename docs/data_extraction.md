@@ -58,22 +58,43 @@ Temporary network or MongoDB Atlas connection problems may interrupt the extract
 
 ## 2. Source Tables and Column Specifications
 
-# Descriptive Analytics
+## Descriptive Analytics
 
-## Table Name: Class Average Scores
+### Table Name: Class Average Scores
 
 | ID | Grade | Section | Student Name | Student Grade | Class Subject | Class Average Scores |
 
-## Table Name: Class Performance Summaries
+### Table Name: Class Performance Summaries
 
 | ID | Grade | Section | Student Name | Student Grade | Class Subject | Class Performance Average |
 
-# Predictive Analytics
+## Predictive Analytics
 
-## Table Name: Student At Risk of Low Performance
+### Table Name: Student At Risk of Low Performance
+
+| ID | Student Name | Class Subject | Section | Grade Level | Student Average Score |
+
+### Table Name: Students Likely To Achieve High Performance
 
 | ID | Student Name | Class Subject | Section | Grade Level | Student Average Score |
 
-## Table Name: Students Likely To Achieve High Performance
+## 3. Extraction Validation and Data Quality Checks
 
-| ID | Student Name | Class Subject | Section | Grade Level | Student Average Score |
+The extraction validation process ensures that the required data is successfully retrieved from the EduLite MongoDB Atlas database. The checks verify database connectivity, collection availability, required fields, identifiers, record counts, and extraction errors before the extracted data is handed over to the Transformation Stage.
+
+| **Check Name** | **Target** | **Purpose** | **Validation Criteria** |
+|---|---|---|---|
+| **Source Connection** | MongoDB Atlas connection | To ensure that the source database is accessible before extraction begins. | **PASS** if the connection is successful and the database can be accessed. **FAIL** if the connection cannot be established. |
+| **Required Collections** | Students, Sections, Subjects, Assessments, and Assessment Scores | To confirm that all required source collections are available. | **PASS** if all five collections exist. **FAIL** if any required collection is missing. |
+| **Required Columns** | Fields required from each source collection | To ensure that the fields needed for the pipeline are available. | **PASS** if all required fields exist in their respective collections. **FAIL** if any required field is missing. |
+| **Required Identifiers** | `_id`, `studentId`, `assessmentId`, `sectionId`, and `subjectId`, where applicable | To ensure that records contain the identifiers needed to identify records and connect related data. | **PASS** if required identifiers are present and non-null in applicable records. **FAIL** if required identifiers are missing or null. |
+| **Primary Key Uniqueness** | `_id` in each source collection | To ensure that each source record has a unique identifier. | **PASS** if no duplicate `_id` values are found within a collection. **FAIL** if duplicate identifiers are detected. |
+| **Record Count** | Records read and extracted from each collection | To monitor how many records are retrieved during extraction. | **PASS** if the number of extracted records matches the number of records read by the extraction process. **FAIL** if a discrepancy is detected. |
+| **Extraction Completeness** | Extracted records from all five collections | To verify that the full extraction retrieves all available records within the selected collections. | **PASS** if the extraction finishes and all records returned by the source queries are accounted for in the extracted output. **FAIL** if records are missing from the output or extraction ends prematurely. |
+| **Extraction Errors and Interruptions** | Extraction script and Prefect workflow execution | To identify failed queries, connection interruptions, or incomplete extraction runs. | **PASS** if all required extraction tasks finish without unhandled errors. **FAIL** if a required task fails or extraction is interrupted before completion. |
+
+### Validation Outcome
+
+The extracted data will be approved for handover to the Transformation Stage when all critical validation checks pass. If a connection problem or extraction error occurs, the pipeline will record the error and stop the handover until the extraction can be completed successfully. Any record-count discrepancy or missing required field will be reported for investigation.
+
+These checks validate the extraction process only. Data cleaning, value standardization, grade calculations, and other business transformations will be handled in the next stage.

@@ -58,6 +58,14 @@ Temporary network or MongoDB Atlas connection problems may interrupt the extract
 
 ## 2. Source Tables and Column Specifications
 
+
+| **Name** | **Purpose** | **Important Columns and Data Types** | **Primary Key / Unique Identifier** | **Relevant Relationship** | **Reason for Inclusion** |
+|---|---|---|---|---|---|
+| Students | Stores student information needed for academic performance records. | `_id` (ObjectId); `name` (String); `grade` (Integer); `sectionId` (ObjectId); `subjectIds` (Array) | `_id` | `sectionId` → `Sections`; `studentId` → `Assessment Scores`; `subjectIds` → `Subjects` | Needed to identify the student, grade level, section, and subjects associated with the student. |
+| Sections | Stores the sections assigned to students. | `_id` (ObjectId); `section_name` (String) | `_id` | `_id` → `Students.sectionId` | Needed to identify the student's section. |
+
+
+
 ## Descriptive Analytics
 
 ### Table Name: Class Average Scores

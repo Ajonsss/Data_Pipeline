@@ -62,7 +62,8 @@ Temporary network or MongoDB Atlas connection problems may interrupt the extract
 | **Name** | **Purpose** | **Important Columns and Data Types** | **Primary Key / Unique Identifier** | **Relevant Relationship** | **Reason for Inclusion** |
 |---|---|---|---|---|---|
 | Students | Stores student information needed for academic performance records. | `_id` (ObjectId); `name` (String); `grade` (Integer); `sectionId` (ObjectId); `subjectIds` (Array) | `_id` | `sectionId` → `Sections`; `studentId` → `Assessment Scores`; `subjectIds` → `Subjects` | Needed to identify the student, grade level, section, and subjects associated with the student. |
-| Sections | Stores the sections assigned to students. | `_id` (ObjectId); `section_name` (String) | `_id` | `_id` → `Students.sectionId` | Needed to identify the student's section. |
+| Sections | Stores the sections assigned to students. | `_id` (ObjectId); `section_name` (String) | `_id` | `_id` → `Students.sectionId` | Needed to identify the student's section. | | Subjects | Stores the subjects associated with student assessments. | _id (ObjectId); subject_name (String) | _id | _id → Assessments.subjectId | Needed to identify the subject associated with assessment results. |
+| Assessments | Stores information about assessments used to evaluate students. | _id (ObjectId); subjectId (ObjectId); totalItems (Integer) | _id | subjectId → Subjects; _id → Assessment Scores.assessmentId | Needed to connect assessment scores to subjects and determine the total number of items for grade calculations. |
 
 
 

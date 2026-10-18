@@ -107,3 +107,56 @@ The extraction validation process ensures that the required data is successfully
 The extracted data will be approved for handover to the Transformation Stage when all critical validation checks pass. If a connection problem or extraction error occurs, the pipeline will record the error and stop the handover until the extraction can be completed successfully. Any record-count discrepancy or missing required field will be reported for investigation.
 
 These checks validate the extraction process only. Data cleaning, value standardization, grade calculations, and other business transformations will be handled in the next stage.
+
+## 4. Extraction Metadata and Log Specification
+
+The EduLITE Data Pipeline records extraction metadata and logs to monitor, validate, and trace each extraction run. These records contain information about execution status, extracted collections, record counts, validation results, and errors.
+
+### Extraction Metadata Fields
+
+| *Field Name* | *Purpose* | *Example Value or Format* |
+|---|---|---|
+| pipeline_run_id | Uniquely identifies each pipeline execution and links extraction logs belonging to the same run. | b2e9fab9-742a-48d6-a9f8-4d9974e10b4d (UUID) |
+| table_or_file_name | Identifies the source collection being extracted or the pipeline summary entry. | students, sections, subjects, assessments, assessmentScores, PIPELINE_SUMMARY |
+| output_file | Records the destination file where extracted data is stored. | pipeline/data/raw/students.json (example relative path; logs store the full path) |
+| extraction_start_timestamp | Records the date and time when the extraction started. | 2026-10-15T09:15:30.650768+00:00 (ISO 8601) |
+| extraction_end_timestamp | Records the date and time when the extraction finished. | 2026-10-15T09:15:30.709084+00:00 (ISO 8601) |
+| extraction_status | Indicates whether the extraction completed successfully or encountered an error. | SUCCESS (String) |
+| records_read | Records the total number of records read from the source collection. | 3 (Integer) |
+| records_extracted | Records the number of records successfully extracted into the output file. | 3 (Integer) |
+| records_rejected | Records the number of records rejected during extraction. | 0 (Integer) |
+| extraction_window | Identifies whether the extraction processes all records or a selected subset. | FULL (String) |
+| validation_results | Stores the results of validation checks performed during extraction. | JSON Object containing Boolean and Integer values |
+| error_message | Records error details when an extraction encounters a problem. | null (No error) |
+| extraction_duration_seconds | Measures the time required to complete the extraction process. | 0.058 (Float, seconds) |
+
+### Extraction Validation Log Fields
+
+The validation_results object contains the following fields, depending on the extraction run and log entry.
+
+| *Field Name* | *Purpose* | *Example Value or Format* |
+|---|---|---|
+| source_read | Confirms that the source collection was successfully read. | true (Boolean) |
+| required_fields_present | Verifies that extracted records contain the required fields. | true (Boolean) |
+| required_identifiers_present | Confirms that required identifiers exist in extracted records. | true (Boolean) |
+| primary_key_unique | Verifies that primary key values are unique within the extracted collection. | true (Boolean) |
+| missing_field_count | Counts records or field occurrences with missing required fields, as defined by the validator. | 0 (Integer) |
+| missing_identifier_count | Records the number of missing required identifiers. | 0 (Integer) |
+| duplicate_id_count | Records the number of duplicate identifiers detected. | 0 (Integer) |
+| invalid_record_count | Records the number of records that failed validation checks. | 0 (Integer) |
+| record_counts_match | Confirms that the number of records read matches the number of successfully extracted records. | true (Boolean) |
+| output_file_exists | Confirms that the extracted JSON output file exists. | true (Boolean) |
+| source_connection | Confirms successful connection to the source database. | true (Boolean) |
+| required_collections | Confirms that the required source collections are available. | true (Boolean) |
+| all_collections_completed | Confirms that all selected collections completed extraction. | true (Boolean) |
+| all_collection_checks_passed | Confirms that all collection-level validation checks passed. | true (Boolean) |
+
+### Use of Metadata and Logs
+
+*Monitoring:* Extraction logs are used to monitor pipeline execution through timestamps, extraction statuses, record counts, and execution durations. These fields help determine whether each extraction completed successfully and whether the expected records were extracted.
+
+*Troubleshooting:* Logs help identify extraction problems by recording errors, failed validation checks, missing fields, duplicate identifiers, and record-count mismatches. This information allows developers to locate the affected collection and investigate the cause of the issue.
+
+*Auditing:* Each extraction is assigned a unique pipeline_run_id, allowing records to be traced to a specific execution. Timestamps, collection names, extracted record counts, and validation results provide evidence of when and how extraction operations were performed.
+
+*Recovery:* When an extraction fails, the logs can identify incomplete or unsuccessful collections that need to be processed again. Since the current pipeline uses full extraction, affected collections can be re-extracted and validated to confirm that the output files contain the expected records. Existing files should be backed up when necessary before rerunning an extraction.

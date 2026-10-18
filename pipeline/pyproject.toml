@@ -1,0 +1,21 @@
+[project]
+name = "pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "BautistaML15", email = "23-13461@g.batstate-u.edu.ph" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "prefect>=3.8.8",
+    "pymongo>=4.19.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+pipeline = "pipeline:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"

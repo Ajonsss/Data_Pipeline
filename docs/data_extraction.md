@@ -160,3 +160,36 @@ The validation_results object contains the following fields, depending on the ex
 *Auditing:* Each extraction is assigned a unique pipeline_run_id, allowing records to be traced to a specific execution. Timestamps, collection names, extracted record counts, and validation results provide evidence of when and how extraction operations were performed.
 
 *Recovery:* When an extraction fails, the logs can identify incomplete or unsuccessful collections that need to be processed again. Since the current pipeline uses full extraction, affected collections can be re-extracted and validated to confirm that the output files contain the expected records. Existing files should be backed up when necessary before rerunning an extraction.
+
+
+## 8. Common Extraction Problems and Mitigation
+
+The EduLite Assessment Analytics ETL Pipeline extracts data from five MongoDB collections and saves the records as JSON files in the `data/raw/` directory. The following table identifies common extraction problems, their possible causes, their impact, and the proposed mitigation.
+
+### 8.1 Common Problems and Solutions
+
+| Problem Description | Possible Cause | Impact on Extraction | Proposed Solution or Mitigation |
+|---|---|---|---|
+| MongoDB connection failure | Network restrictions, incorrect connection settings, or an IP address not allowed in MongoDB Atlas. | The pipeline cannot retrieve the source records. | Check network connectivity, verify the MongoDB URI, and confirm that the current IP address is allowed in MongoDB Atlas. |
+| Required collection is missing | A collection name is incorrect or the collection does not exist in the source database. | Extraction cannot retrieve the expected dataset. | Verify the exact collection names: `students`, `sections`, `subjects`, `assessments`, and `assessmentScores`. |
+| Missing required fields or identifiers | Source documents do not contain fields required by the extraction code. | Validation fails or records are flagged as invalid. | Review the affected documents and update the source data or validation rules when appropriate. |
+| Duplicate document identifiers | Duplicate `_id` values are detected in the extracted dataset or validation process. | The dataset may not satisfy the uniqueness requirement. | Investigate the duplicate identifiers and verify the source data before accepting the output. |
+| Record-count mismatch | Extraction is interrupted or the number of extracted records differs from the number read. | The output may be incomplete or unreliable. | Review the extraction logs, investigate the discrepancy, and rerun extraction after resolving the cause. |
+| JSON output file cannot be generated | File permissions, an invalid output path, or a disk-related problem prevents writing. | The expected raw dataset is unavailable for the next stage. | Check the output directory, file permissions, and available disk space, then rerun extraction. |
+| Prefect server connection failure | The temporary Prefect server stops or becomes unreachable during the flow run. | The flow may fail to update its execution state or report completion correctly. | Review the Prefect error messages and local server status, then rerun the flow after resolving the issue. |
+
+### 8.2 Monitoring and Handover
+
+The extraction stage records metadata such as the pipeline run ID, collection name, timestamps, extraction status, record counts, validation results, duration, and error information.
+
+Before handover, the pipeline maintainer should verify that:
+
+1. All five required collections have been extracted.
+2. Required fields and identifiers pass validation.
+3. Duplicate identifier and record-count checks pass.
+4. All expected JSON files exist.
+5. The extraction logs indicate successful completion.
+
+Only validated extraction outputs should proceed to the Transformation Stage. The extraction stage preserves the source data and performs validation; data cleaning, standardization, and business transformations are handled in subsequent stages.
+
+**Implementation note:** The connection checks, required-field validation, duplicate ID checks, record-count checks, JSON file checks, and logging are reflected in the current extraction code. Automatic retries, quarantine of partial files, and recovery from Prefect server failures should be treated as proposed mitigations unless those behaviors are implemented separately.

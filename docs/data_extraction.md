@@ -161,6 +161,111 @@ The validation_results object contains the following fields, depending on the ex
 
 *Recovery:* When an extraction fails, the logs can identify incomplete or unsuccessful collections that need to be processed again. Since the current pipeline uses full extraction, affected collections can be re-extracted and validated to confirm that the output files contain the expected records. Existing files should be backed up when necessary before rerunning an extraction.
 
+## 7. Extraction Acceptance and Handover Rules
+
+### 7.1 Acceptance Decision Rules
+
+The following rules define the conditions for accepting, reviewing, or rejecting an extraction run.
+
+| *Overall Condition* | *Acceptance Decision* | *Pipeline Action* | *Decision Type* |
+|---|---|---|---|
+| All five required collections are accessible, validation checks pass, record counts match, and all required JSON files are generated. | APPROVED | Allow the extracted data and associated metadata to proceed to the Transformation Stage. | Automatic, once implemented |
+| Extraction completes, but a non-critical warning or unexpected record-count difference requires investigation. | MANUAL REVIEW | Hold the affected output until the issue is reviewed and resolved or formally accepted. | Manual |
+| A critical validation check fails, a required collection is unavailable, or required fields or identifiers are missing. | REJECTED | Prevent the affected output from proceeding and record the failure for investigation. | Automatic rejection, once implemented |
+| Extraction is interrupted, or an expected JSON file cannot be generated or read. | REJECTED | Record the error, preserve diagnostic logs, and retry after the underlying issue is resolved. | Automatic rejection, once implemented |
+
+A rejected extraction must not be treated as approved simply because some records were successfully retrieved. Partial output must be identified and prevented from being mistaken for a complete dataset.
+
+### 7.2 Automatic Approval
+
+An extraction run may be approved automatically when all the following conditions are satisfied:
+
+1. The connection to MongoDB Atlas is successful.
+2. All five required collections are available and accessible.
+3. Required fields and identifiers pass validation.
+4. Duplicate _id values are not detected.
+5. The number of records read matches the number extracted.
+6. Extraction completes without unresolved critical errors.
+7. All required JSON files are successfully generated.
+8. Extraction metadata and validation results are recorded.
+
+Proposed pipeline action: Once automatic acceptance is implemented, the pipeline may mark the run as APPROVED and make the validated JSON files available to the Transformation Stage.
+
+### 7.3 Manual Review
+
+Manual review is required when extraction completes but an issue needs further investigation before the output can be accepted.
+
+Examples include:
+
+- Unexpected record-count differences.
+- Non-critical validation warnings.
+- Unexpected changes to source fields or schema.
+- Output discrepancies that require verification against MongoDB.
+
+Proposed pipeline action: Hold the affected output for review. The ETL developer or designated pipeline maintainer should examine the extraction logs, validation results, and JSON files. The reviewer should document the decision and its justification before the data proceeds.
+
+Manual review must not be used to bypass a critical validation failure.
+
+### 7.4 Rejection and Failure Handling
+
+An extraction run must be rejected when a critical failure prevents the output from meeting the extraction requirements.
+
+Examples include:
+
+- MongoDB Atlas cannot be accessed.
+- A required collection is missing or inaccessible.
+- Required fields or identifiers are missing.
+- Duplicate _id values are detected.
+- Record counts do not match.
+- A required JSON file cannot be generated or read.
+- The extraction process is interrupted or fails.
+
+Proposed recovery procedure:
+
+1. Record the failure details, affected collection, and pipeline run ID.
+2. Preserve the logs and identify any partial output.
+3. Prevent incomplete or rejected data from being handed over as an accepted dataset.
+4. Resolve the underlying issue, such as a connection problem or schema change.
+5. Rerun the extraction.
+6. Repeat the validation checks before approving the output.
+
+Retry behavior and partial-output quarantine must be implemented before they can be considered active pipeline features.
+
+### 7.5 Handover to the Transformation Stage
+
+An approved extraction run should provide the following handover package:
+
+| *Handover Item* | *Description* | *Purpose* |
+|---|---|---|
+| Extracted JSON files | students.json, sections.json, subjects.json, assessments.json, and assessmentScores.json. | Supplies raw data for downstream transformation. |
+| Run metadata | Pipeline run ID, timestamps, collection name, extraction status, record counts, and extraction duration. | Tracks the extraction run and its outputs. |
+| Validation summary | Required-field checks, identifier checks, duplicate ID checks, record-count checks, and output file verification. | Confirms whether the extracted data meets the validation requirements. |
+| Error and warning information | Relevant errors, warnings, and rejected-record counts, if applicable. | Supports troubleshooting and documents extraction issues. |
+| Output manifest | A proposed record of generated files and their associated pipeline run. | Helps the next stage identify and verify its expected input files. |
+
+The Transformation Stage should receive only data that satisfies the applicable acceptance rules. The extracted JSON files should preserve the source field names and data types. Data cleaning, standardization, and grade calculations should occur during the appropriate downstream stages.
+
+### 7.6 Implementation Status and Responsibility
+
+*Confirmed in the current extraction code:*
+
+- Extraction of five MongoDB collections.
+- Saving extracted records as JSON files in data/raw/.
+- Validation of required fields and identifiers.
+- Duplicate _id checks.
+- Record-count consistency checks.
+- Output file existence checks.
+- Logging of run IDs, timestamps, extraction status, record counts, validation results, and errors.
+
+*Proposed policies pending implementation or approval:*
+
+- Formal APPROVED, MANUAL REVIEW, and REJECTED decision states.
+- Automatic acceptance and rejection logic.
+- Manual review and approval recording.
+- Automatic retry handling and partial-output quarantine.
+- Output manifests and formal handover packaging.
+
+The ETL developer or designated pipeline maintainer is responsible for reviewing exceptions, resolving extraction issues, and confirming that the implemented pipeline follows the documented acceptance and handover rules.
 
 ## 8. Common Extraction Problems and Mitigation
 

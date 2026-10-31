@@ -189,6 +189,46 @@ Audit records are logs retained for longer periods when needed to document impor
 
 The retention period and access rules will be reviewed periodically to ensure that logs remain available when needed and are protected against unauthorized access or premature deletion.
 
+## 6. Extraction Data Contract and Naming Convention
+
+The EduLite Assessment Analytics ETL Pipeline extracts data from five MongoDB collections, validates required fields and identifiers, and saves records as JSON files in the `data/raw/` directory.
+
+## 6.1 Required Schema
+
+| Collection | Required Fields | Data Types |
+|---|---|---|
+| `students` | `_id`, `name`, `grade`, `sectionId` | ObjectId, String, Integer, ObjectId |
+| `sections` | `_id`, `name` | ObjectId, String |
+| `subjects` | `_id`, `name` | ObjectId, String |
+| `assessments` | `_id`, `name`, `subjectId`, `totalItems` | ObjectId, String, ObjectId, Integer |
+| `assessmentScores` | `_id`, `studentId`, `assessmentId`, `score` | ObjectId, ObjectId, ObjectId, Integer |
+
+The `_id` field must be unique. The pipeline checks required fields, identifiers, duplicate IDs, record counts, and output file existence.
+
+### 6.2 Naming Convention
+
+- **Collection names:** Preserve the exact MongoDB names, such as `assessmentScores`.
+- **Output filenames:** Use the collection name with a `.json` extension, such as `students.json`.
+- **Source fields:** Preserve original names, such as `studentId` and `sectionId`.
+- **Log fields:** Use `snake_case`, such as `pipeline_run_id` and `records_extracted`.
+- **Identifiers:** Use `_id` for document IDs and reference fields such as `studentId` and `assessmentId` for related records.
+
+### 6.3 Schema Consistency
+
+The pipeline validates required fields and identifiers, checks duplicate IDs and record counts, and verifies that output files exist. If required fields are missing or the source schema changes, the validation rules and extraction code must be reviewed and updated. Any field renaming or data type changes should be documented to maintain consistency.
+
+#### Source-to-Standardized Field Mapping
+
+The current extraction code preserves source field names and data types, so no renaming is performed.
+
+| Source Column | Standardized Column | Mapping Type |
+|---|---|---|
+| `_id` | `_id` | No change |
+| `studentId` | `studentId` | No change |
+| `sectionId` | `sectionId` | No change |
+| `assessmentId` | `assessmentId` | No change |
+| `subjectId` | `subjectId` | No change |
+
 
 
 ## 7. Extraction Acceptance and Handover Rules

@@ -161,6 +161,36 @@ The validation_results object contains the following fields, depending on the ex
 
 *Recovery:* When an extraction fails, the logs can identify incomplete or unsuccessful collections that need to be processed again. Since the current pipeline uses full extraction, affected collections can be re-extracted and validated to confirm that the output files contain the expected records. Existing files should be backed up when necessary before rerunning an extraction.
 
+
+## 5. Log Retention and Access
+
+The extraction logs of the EduLite Assessment Analytics ETL Pipeline will be retained to support monitoring, troubleshooting, auditing, and recovery.
+
+| **Item** | **Specification** |
+|---|---|
+| **Log Retention Period** | Operational extraction logs will be retained for **90 days**. This period provides sufficient time to review recent extraction runs, investigate errors, and recover from failures. |
+| **Storage Location** | Logs will be stored in `pipeline/data/logs/extraction_logs.jsonl` on the local project environment. |
+| **Access Permissions** | Access will be limited to authorized project members responsible for developing, maintaining, and monitoring the pipeline. Database credentials and other secrets must not be included in log files. |
+| **Archiving Requirements** | Logs that must be kept beyond 90 days for academic evaluation, auditing, or unresolved investigations will be archived in a secure location with restricted access. |
+| **Deletion Rules** | Operational logs may be deleted after the 90-day retention period, provided they are no longer needed for troubleshooting, auditing, recovery, or unresolved investigations. |
+| **Responsible Process** | The pipeline maintainer will review log retention, ensure required logs are archived, and authorize deletion when the retention conditions are satisfied. |
+
+### Operational Logs and Audit Records
+
+**Operational Logs**
+
+Operational logs record extraction run IDs, timestamps, statuses, record counts, validation results, and error messages. They are used to monitor pipeline execution and troubleshoot failures.
+
+**Audit Records**
+
+Audit records are logs retained for longer periods when needed to document important events, support investigations, or meet academic or organizational requirements. These records will be stored securely and will not be deleted while they remain necessary for auditing or recovery.
+
+### Retention and Access Review
+
+The retention period and access rules will be reviewed periodically to ensure that logs remain available when needed and are protected against unauthorized access or premature deletion.
+
+
+
 ## 7. Extraction Acceptance and Handover Rules
 
 ### 7.1 Acceptance Decision Rules

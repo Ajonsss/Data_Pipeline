@@ -1,7 +1,6 @@
 import json
 import os
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -179,7 +178,7 @@ def extract_collection(database, collection_name, run_id):
 
 @flow(name="EduLite Assessment Analytics ETL - Extraction")
 def extraction_flow():
-    run_id = str(uuid.uuid4())
+    run_id = datetime.now().strftime("EXT_%Y%m%d_%H%M")
     pipeline_start = time.monotonic()
     pipeline_start_timestamp = timestamp()
 
@@ -292,4 +291,8 @@ def extraction_flow():
 
 
 if __name__ == "__main__":
-    extraction_flow()
+    extraction_flow.serve(
+        name="edulite-daily-extraction",
+        cron="0 16 * * *",
+        tags=["edulite", "extraction", "daily"],
+    )

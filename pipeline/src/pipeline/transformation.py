@@ -23,6 +23,11 @@ LOG_DIR = PIPELINE_DIR / "data" / "logs"
 
 TRANSFORMATION_LOG = LOG_DIR / "transformation_logs.jsonl"
 
+# Transformation quarantine file for rejected records.
+TRANSFORMATION_QUARANTINE = (
+    LOG_DIR / "transformation_quarantine.jsonl"
+)
+
 # Extraction log files to check for the parent run ID.
 EXTRACTION_LOG_FILES = [
     LOG_DIR / "extraction_logs.jsonl",
@@ -115,6 +120,7 @@ def get_parent_run_id():
 
     return latest_run.get("pipeline_run_id")
 
+
 def create_transformation_metadata():
     """Create metadata for a new transformation batch."""
     timestamp = datetime.now(timezone.utc)
@@ -157,6 +163,36 @@ def write_log(entry):
 
     with TRANSFORMATION_LOG.open("a", encoding="utf-8") as file:
         file.write(json_util.dumps(entry) + "\n")
+
+
+def write_quarantine_record(
+    batch_id,
+    rule_id,
+    reason,
+    record_reference,
+):
+    """
+    Save a rejected transformation record reference and its reason.
+
+    The quarantine file stores the batch ID, rule ID, rejection reason,
+    timestamp, and record reference without copying the complete
+    student record or unnecessary sensitive information.
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    quarantine_entry = {
+        "timestamp": get_timestamp(),
+        "batch_id": batch_id,
+        "rule_id": rule_id,
+        "rejection_reason": reason,
+        "record_reference": record_reference,
+    }
+
+    with TRANSFORMATION_QUARANTINE.open(
+        "a",
+        encoding="utf-8",
+    ) as file:
+        file.write(json_util.dumps(quarantine_entry) + "\n")
 
 
 # ============================================================
@@ -795,6 +831,23 @@ def transform_data():
                     "record_type": "student",
                     "reason": "Missing student ID",
                 })
+
+                # Quarantine each affected student-subject-term combination.
+                for subject in subjects:
+                    subject_id = mongo_id(subject.get("_id"))
+
+                    for term in TERM_NUMBERS:
+                        write_quarantine_record(
+                            batch_id=metadata["batch_id"],
+                            rule_id="TR-001",
+                            reason="Missing student ID",
+                            record_reference={
+                                "student_id": None,
+                                "subject_id": subject_id,
+                                "term": term,
+                            },
+                        )
+
                 continue
 
             for subject in subjects:
@@ -808,6 +861,20 @@ def transform_data():
                         "student_id": student_id,
                         "reason": "Missing subject ID",
                     })
+
+                    # Quarantine each affected student-subject-term combination.
+                    for term in TERM_NUMBERS:
+                        write_quarantine_record(
+                            batch_id=metadata["batch_id"],
+                            rule_id="TR-002",
+                            reason="Missing subject ID",
+                            record_reference={
+                                "student_id": student_id,
+                                "subject_id": None,
+                                "term": term,
+                            },
+                        )
+
                     continue
 
                 student_term_results = []

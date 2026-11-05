@@ -23,18 +23,16 @@ LOG_DIR = PIPELINE_DIR / "data" / "logs"
 
 TRANSFORMATION_LOG = LOG_DIR / "transformation_logs.jsonl"
 
-# Transformation quarantine file for rejected records.
 TRANSFORMATION_QUARANTINE = (
     LOG_DIR / "transformation_quarantine.jsonl"
 )
 
-# Extraction log files to check for the parent run ID.
 EXTRACTION_LOG_FILES = [
     LOG_DIR / "extraction_logs.jsonl",
     LOG_DIR / "extraction_log.jsonl",
 ]
 
-CODE_VERSION = "1.0.0"
+CODE_VERSION = "2.0.0"
 
 COLLECTIONS = [
     "sections",
@@ -68,6 +66,7 @@ ST1_WEIGHT = 0.30
 ST2_WEIGHT = 0.30
 TERM_EXAM_WEIGHT = 0.40
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -84,38 +83,45 @@ def get_timestamp():
 def get_parent_run_id():
     """Get the latest successful extraction pipeline run ID."""
 
-    extraction_log = LOG_DIR / "extraction_logs.jsonl"
-
-    if not extraction_log.exists():
-        return None
-
     successful_runs = []
 
-    with open(extraction_log, "r", encoding="utf-8") as file:
-        for line in file:
-            if not line.strip():
-                continue
+    for log_path in EXTRACTION_LOG_FILES:
 
-            try:
-                entry = json.loads(line)
+        if not log_path.exists():
+            continue
 
-                # Use only the overall pipeline summary
-                if (
-                    entry.get("table_or_file_name") == "PIPELINE_SUMMARY"
-                    and entry.get("extraction_status") == "SUCCESS"
-                ):
-                    successful_runs.append(entry)
+        with log_path.open("r", encoding="utf-8") as file:
 
-            except json.JSONDecodeError:
-                logging.warning("Invalid JSON entry in extraction log.")
+            for line in file:
+                if not line.strip():
+                    continue
+
+                try:
+                    entry = json.loads(line)
+
+                    if (
+                        entry.get("table_or_file_name")
+                        == "PIPELINE_SUMMARY"
+                        and entry.get("extraction_status")
+                        == "SUCCESS"
+                    ):
+                        successful_runs.append(entry)
+
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Invalid JSON entry in %s",
+                        log_path.name,
+                    )
 
     if not successful_runs:
         return None
 
-    # Get the most recent successful extraction run
     latest_run = max(
         successful_runs,
-        key=lambda entry: entry.get("extraction_end_timestamp", "")
+        key=lambda entry: entry.get(
+            "extraction_end_timestamp",
+            "",
+        ),
     )
 
     return latest_run.get("pipeline_run_id")
@@ -123,18 +129,24 @@ def get_parent_run_id():
 
 def create_transformation_metadata():
     """Create metadata for a new transformation batch."""
+
     timestamp = datetime.now(timezone.utc)
 
-    run_id = f"TRN_{timestamp.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_id = (
+        f"TRN_{timestamp.strftime('%Y%m%d_%H%M%S')}_"
+        f"{uuid.uuid4().hex[:8]}"
+    )
 
     return {
         "run_id": run_id,
         "parent_run_id": get_parent_run_id(),
         "batch_id": f"BATCH_{uuid.uuid4().hex[:12].upper()}",
+
         "batch_window": {
             "start_date": None,
             "end_date": None,
         },
+
         "table_name": {
             "source": [
                 f"{collection}.json"
@@ -142,16 +154,21 @@ def create_transformation_metadata():
             ],
             "output": OUTPUT_FILES,
         },
+
         "start_time": get_timestamp(),
         "end_time": None,
         "status": "RUNNING",
+
         "records_read": 0,
         "records_output": 0,
         "records_rejected": 0,
+
         "rules_applied": {},
         "validation_results": {},
+
         "error_message": None,
         "error_code": None,
+
         "duration_seconds": 0,
         "code_version": CODE_VERSION,
     }
@@ -159,9 +176,13 @@ def create_transformation_metadata():
 
 def write_log(entry):
     """Append one transformation metadata record as JSON Lines."""
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    with TRANSFORMATION_LOG.open("a", encoding="utf-8") as file:
+    with TRANSFORMATION_LOG.open(
+        "a",
+        encoding="utf-8",
+    ) as file:
         file.write(json_util.dumps(entry) + "\n")
 
 
@@ -172,12 +193,9 @@ def write_quarantine_record(
     record_reference,
 ):
     """
-    Save a rejected transformation record reference and its reason.
-
-    The quarantine file stores the batch ID, rule ID, rejection reason,
-    timestamp, and record reference without copying the complete
-    student record or unnecessary sensitive information.
+    Save a rejected transformation record reference and reason.
     """
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     quarantine_entry = {
@@ -192,7 +210,9 @@ def write_quarantine_record(
         "a",
         encoding="utf-8",
     ) as file:
-        file.write(json_util.dumps(quarantine_entry) + "\n")
+        file.write(
+            json_util.dumps(quarantine_entry) + "\n"
+        )
 
 
 # ============================================================
@@ -201,15 +221,24 @@ def write_quarantine_record(
 
 def ensure_directories():
     """Create output directories when they do not exist."""
-    TRANSFORMED_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    TRANSFORMED_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    LOG_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
 
 def load_json_file(file_path):
     """
-    Load JSON that may contain MongoDB Extended JSON values,
-    such as ObjectId represented by {"$oid": "..."}.
+    Load JSON containing MongoDB Extended JSON values,
+    including ObjectIds and dates.
     """
+
     if not file_path.exists():
         raise FileNotFoundError(
             f"Required cleaned file was not found: {file_path}"
@@ -221,10 +250,13 @@ def load_json_file(file_path):
 
 def load_cleaned_data():
     """Load all cleaned collection files."""
+
     data = {}
 
     for collection in COLLECTIONS:
+
         file_path = CLEAN_DIR / f"{collection}.json"
+
         data[collection] = load_json_file(file_path)
 
         if not isinstance(data[collection], list):
@@ -237,6 +269,7 @@ def load_cleaned_data():
 
 def mongo_id(value):
     """Convert MongoDB ObjectIds to strings."""
+
     if value is None:
         return None
 
@@ -245,6 +278,7 @@ def mongo_id(value):
 
 def parse_number(value):
     """Return a numeric value or None for missing/invalid values."""
+
     if value is None or isinstance(value, bool):
         return None
 
@@ -256,21 +290,39 @@ def parse_number(value):
 
     try:
         return float(value)
+
     except (TypeError, ValueError):
         return None
 
 
 def rounded(value, places=2):
     """Round numeric results consistently."""
+
     if value is None:
         return None
 
     return round(value, places)
 
 
+def normalize_integer(value):
+    """Convert valid integer-like values to integers."""
+
+    number = parse_number(value)
+
+    if number is None or not number.is_integer():
+        return None
+
+    return int(number)
+
+
 def write_json(file_path, data):
-    """Write JSON output, converting ObjectIds and dates safely."""
-    with file_path.open("w", encoding="utf-8") as file:
+    """Write JSON output using MongoDB Extended JSON."""
+
+    with file_path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+
         file.write(
             json_util.dumps(
                 data,
@@ -285,9 +337,11 @@ def get_batch_window(assessments):
     Determine the earliest and latest assessment dates
     included in the transformation batch.
     """
+
     dates = []
 
     for assessment in assessments:
+
         value = assessment.get("date")
 
         if isinstance(value, datetime):
@@ -297,12 +351,14 @@ def get_batch_window(assessments):
             dates.append(value)
 
         elif isinstance(value, str):
+
             try:
                 dates.append(
                     datetime.fromisoformat(
                         value.replace("Z", "+00:00")
                     ).date()
                 )
+
             except ValueError:
                 continue
 
@@ -319,34 +375,55 @@ def get_batch_window(assessments):
 
 
 # ============================================================
-# Assessment and Student Matching
+# Normalization Helpers
 # ============================================================
 
-def build_score_lookup(scores):
-    """
-    Map each student's score for each assessment.
+def get_assessment_category(assessment):
+    """Use the official category field, not the legacy type field."""
 
-    Missing or blank scores are treated as zero when the
-    assessment applies to the student. HPS remains included.
-    """
-    lookup = {}
+    category = assessment.get("category")
 
-    for record in scores:
-        student_id = mongo_id(record.get("studentId"))
-        assessment_id = mongo_id(record.get("assessmentId"))
+    if not isinstance(category, str):
+        return None
 
-        if not student_id or not assessment_id:
-            continue
+    category = category.strip().lower()
 
-        score = parse_number(record.get("score"))
+    if category not in VALID_CATEGORIES:
+        return None
 
-        if score is None:
-            score = 0
+    return category
 
-        lookup[(student_id, assessment_id)] = score
 
-    return lookup
+def get_assessment_term(assessment):
+    """Normalize the assessment term."""
 
+    return normalize_integer(assessment.get("term"))
+
+
+def get_assessment_sequence(assessment):
+    """Normalize the assessment sequence."""
+
+    return normalize_integer(assessment.get("sequence"))
+
+
+def get_student_subject_ids(student):
+    """Return the subject IDs assigned to a student."""
+
+    subject_ids = student.get("subjectIds")
+
+    if not isinstance(subject_ids, list):
+        return set()
+
+    return {
+        mongo_id(subject_id)
+        for subject_id in subject_ids
+        if subject_id is not None
+    }
+
+
+# ============================================================
+# Assessment and Student Matching
+# ============================================================
 
 def assessment_applies_to_student(assessment, student):
     """
@@ -355,22 +432,39 @@ def assessment_applies_to_student(assessment, student):
     Null or empty classSections means subject-wide.
     Otherwise, grade and section must match.
     """
+
     class_sections = assessment.get("classSections")
 
     if not class_sections:
         return True
 
-    student_grade = student.get("grade")
-    student_section_id = mongo_id(student.get("sectionId"))
+    if not isinstance(class_sections, list):
+        return False
+
+    student_grade = normalize_integer(
+        student.get("grade")
+    )
+
+    student_section_id = mongo_id(
+        student.get("sectionId")
+    )
 
     for class_section in class_sections:
-        assigned_grade = class_section.get("grade")
+
+        if not isinstance(class_section, dict):
+            continue
+
+        assigned_grade = normalize_integer(
+            class_section.get("grade")
+        )
+
         assigned_section_id = mongo_id(
             class_section.get("sectionId")
         )
 
         if (
-            student_grade == assigned_grade
+            student_grade is not None
+            and student_grade == assigned_grade
             and student_section_id == assigned_section_id
         ):
             return True
@@ -378,14 +472,257 @@ def assessment_applies_to_student(assessment, student):
     return False
 
 
-def get_assessment_category(assessment):
-    """Use the official category field, not the legacy type field."""
-    category = assessment.get("category")
+def owners_match(student, subject, assessment=None):
+    """Verify that related records belong to the same teacher."""
 
-    if category not in VALID_CATEGORIES:
-        return None
+    student_owner = mongo_id(
+        student.get("ownerId")
+    )
 
-    return category
+    subject_owner = mongo_id(
+        subject.get("ownerId")
+    )
+
+    if not student_owner or student_owner != subject_owner:
+        return False
+
+    if assessment is not None:
+
+        assessment_owner = mongo_id(
+            assessment.get("ownerId")
+        )
+
+        if assessment_owner != student_owner:
+            return False
+
+    return True
+
+
+def get_applicable_assessments(
+    student,
+    subject,
+    term,
+    assessments,
+    rules_applied,
+):
+    """Find assessments belonging to the student's subject and term."""
+
+    applicable = []
+
+    student_owner = mongo_id(
+        student.get("ownerId")
+    )
+
+    subject_owner = mongo_id(
+        subject.get("ownerId")
+    )
+
+    if (
+        not student_owner
+        or student_owner != subject_owner
+    ):
+        rules_applied["owner_mismatch"] += 1
+        return applicable
+
+    for assessment in assessments:
+
+        if (
+            mongo_id(assessment.get("subjectId"))
+            != mongo_id(subject.get("_id"))
+        ):
+            continue
+
+        if get_assessment_term(assessment) != term:
+            continue
+
+        assessment_owner = mongo_id(
+            assessment.get("ownerId")
+        )
+
+        if assessment_owner != student_owner:
+            rules_applied["owner_mismatch"] += 1
+            continue
+
+        if not assessment_applies_to_student(
+            assessment,
+            student,
+        ):
+            continue
+
+        if get_assessment_category(assessment) is None:
+            # Legacy or unsupported assessment categories
+            # are not included in the grading calculation.
+            rules_applied["unsupported_assessment_category"] += 1
+            continue
+
+        applicable.append(assessment)
+
+    return applicable
+
+
+# ============================================================
+# Score Lookup and Validation
+# ============================================================
+
+def build_score_lookup(scores):
+    """
+    Group score records by student and assessment.
+
+    Grouping allows duplicate records to be detected instead
+    of silently overwriting an earlier score.
+    """
+
+    lookup = defaultdict(list)
+
+    for record in scores:
+
+        student_id = mongo_id(
+            record.get("studentId")
+        )
+
+        assessment_id = mongo_id(
+            record.get("assessmentId")
+        )
+
+        if not student_id or not assessment_id:
+            continue
+
+        lookup[(student_id, assessment_id)].append(record)
+
+    return lookup
+
+
+def get_student_assessment_score(
+    student,
+    assessment,
+    score_lookup,
+    rules_applied,
+    batch_id,
+):
+    """
+    Retrieve and validate a student's assessment score.
+
+    Missing score records and blank score values are treated
+    as zero. HPS remains included in the calculation.
+    """
+
+    student_id = mongo_id(
+        student.get("_id")
+    )
+
+    assessment_id = mongo_id(
+        assessment.get("_id")
+    )
+
+    records = score_lookup.get(
+        (student_id, assessment_id),
+        [],
+    )
+
+    if not records:
+
+        rules_applied["missing_score_defaulted_to_zero"] += 1
+
+        return 0, "COMPLETE"
+
+    if len(records) > 1:
+
+        rules_applied["duplicate_score_records"] += 1
+
+        for record in records:
+
+            write_quarantine_record(
+                batch_id=batch_id,
+                rule_id="TR-006",
+                reason="Duplicate student-assessment score records",
+                record_reference={
+                    "score_id": mongo_id(record.get("_id")),
+                    "student_id": student_id,
+                    "assessment_id": assessment_id,
+                },
+            )
+
+        return None, "INCOMPLETE"
+
+    record = records[0]
+
+    student_owner = mongo_id(
+        student.get("ownerId")
+    )
+
+    assessment_owner = mongo_id(
+        assessment.get("ownerId")
+    )
+
+    score_owner = mongo_id(
+        record.get("ownerId")
+    )
+
+    if not (
+        student_owner
+        and assessment_owner
+        and score_owner
+        and student_owner == assessment_owner == score_owner
+    ):
+
+        rules_applied["score_owner_mismatch"] += 1
+
+        write_quarantine_record(
+            batch_id=batch_id,
+            rule_id="TR-007",
+            reason="Score record owner does not match student and assessment owner",
+            record_reference={
+                "score_id": mongo_id(record.get("_id")),
+                "student_id": student_id,
+                "assessment_id": assessment_id,
+            },
+        )
+
+        return None, "INCOMPLETE"
+
+    raw_score = record.get("score")
+
+    # Missing or blank learner score is treated as zero.
+    if raw_score is None or (
+        isinstance(raw_score, str)
+        and raw_score.strip() == ""
+    ):
+
+        rules_applied["blank_score_defaulted_to_zero"] += 1
+
+        return 0, "COMPLETE"
+
+    score = parse_number(raw_score)
+
+    hps = parse_number(
+        assessment.get("totalItems")
+    )
+
+    if (
+        score is None
+        or hps is None
+        or score < 0
+        or score > hps
+    ):
+
+        rules_applied["invalid_score_records"] += 1
+
+        write_quarantine_record(
+            batch_id=batch_id,
+            rule_id="TR-008",
+            reason="Invalid score: score must be numeric and between zero and HPS",
+            record_reference={
+                "score_id": mongo_id(record.get("_id")),
+                "student_id": student_id,
+                "assessment_id": assessment_id,
+                "score": raw_score,
+                "hps": hps,
+            },
+        )
+
+        return None, "INCOMPLETE"
+
+    return score, "COMPLETE"
 
 
 # ============================================================
@@ -397,66 +734,152 @@ def calculate_category(
     student,
     score_lookup,
     rules_applied,
+    batch_id,
 ):
     """
     Calculate category percentage.
 
-    Percentage = total earned score / total HPS * 100
+    Percentage = total earned score / total HPS * 100.
+
+    A category with no assessments is NOT_APPLICABLE.
     """
-    total_score = 0.0
-    total_hps = 0.0
-    assessment_count = 0
 
-    student_id = mongo_id(student.get("_id"))
+    if not assessments:
 
-    for assessment in assessments:
-        assessment_id = mongo_id(assessment.get("_id"))
-        hps = parse_number(assessment.get("totalItems"))
-
-        if not assessment_id or hps is None or hps <= 0:
-            continue
-
-        score_key = (student_id, assessment_id)
-
-        if score_key not in score_lookup:
-            rules_applied["missing_score_defaulted_to_zero"] += 1
-
-        score = score_lookup.get(score_key, 0)
-
-        total_score += score
-        total_hps += hps
-        assessment_count += 1
-
-    if assessment_count == 0 or total_hps <= 0:
         return {
-            "status": "INCOMPLETE",
+            "status": "NOT_APPLICABLE",
             "assessment_count": 0,
             "total_score": 0,
             "total_hps": 0,
             "percentage": None,
         }
 
-    percentage = (total_score / total_hps) * 100
+    total_score = 0.0
+    total_hps = 0.0
+
+    for assessment in assessments:
+
+        assessment_id = mongo_id(
+            assessment.get("_id")
+        )
+
+        hps = parse_number(
+            assessment.get("totalItems")
+        )
+
+        if (
+            not assessment_id
+            or hps is None
+            or hps <= 0
+        ):
+
+            rules_applied["invalid_assessments"] += 1
+
+            write_quarantine_record(
+                batch_id=batch_id,
+                rule_id="TR-003",
+                reason="Assessment has a missing ID or invalid HPS",
+                record_reference={
+                    "assessment_id": assessment_id,
+                    "student_id": mongo_id(
+                        student.get("_id")
+                    ),
+                },
+            )
+
+            return {
+                "status": "INCOMPLETE",
+                "assessment_count": len(assessments),
+                "total_score": None,
+                "total_hps": None,
+                "percentage": None,
+            }
+
+        score, score_status = get_student_assessment_score(
+            student,
+            assessment,
+            score_lookup,
+            rules_applied,
+            batch_id,
+        )
+
+        if score_status != "COMPLETE":
+
+            return {
+                "status": "INCOMPLETE",
+                "assessment_count": len(assessments),
+                "total_score": None,
+                "total_hps": None,
+                "percentage": None,
+            }
+
+        total_score += score
+        total_hps += hps
+
+    if total_hps <= 0:
+
+        return {
+            "status": "INCOMPLETE",
+            "assessment_count": len(assessments),
+            "total_score": None,
+            "total_hps": None,
+            "percentage": None,
+        }
+
+    percentage = (
+        total_score / total_hps
+    ) * 100
+
     rules_applied["category_percentage_calculation"] += 1
 
     return {
         "status": "COMPLETE",
-        "assessment_count": assessment_count,
+        "assessment_count": len(assessments),
         "total_score": rounded(total_score),
         "total_hps": rounded(total_hps),
         "percentage": rounded(percentage),
     }
 
 
-def find_sequence_assessment(assessments, sequence):
-    """Find an assessment with a specific sequence number."""
+def find_sequence_assessment(
+    assessments,
+    sequence,
+    student,
+    rules_applied,
+    batch_id,
+):
+    """Find exactly one assessment with the required sequence."""
+
     matches = [
         assessment
         for assessment in assessments
-        if assessment.get("sequence") == sequence
+        if get_assessment_sequence(assessment) == sequence
     ]
 
-    if len(matches) != 1:
+    if len(matches) > 1:
+
+        rules_applied["duplicate_assessment_sequences"] += 1
+
+        for assessment in matches:
+
+            write_quarantine_record(
+                batch_id=batch_id,
+                rule_id="TR-004",
+                reason=f"Duplicate assessment sequence {sequence}",
+                record_reference={
+                    "student_id": mongo_id(
+                        student.get("_id")
+                    ),
+                    "assessment_id": mongo_id(
+                        assessment.get("_id")
+                    ),
+                    "sequence": sequence,
+                },
+            )
+
+        return None
+
+    if not matches:
         return None
 
     return matches[0]
@@ -467,9 +890,12 @@ def calculate_single_assessment(
     student,
     score_lookup,
     rules_applied,
+    batch_id,
 ):
     """Calculate the percentage for one ST or Term Exam."""
+
     if assessment is None:
+
         return {
             "status": "INCOMPLETE",
             "assessment_id": None,
@@ -478,10 +904,34 @@ def calculate_single_assessment(
             "percentage": None,
         }
 
-    assessment_id = mongo_id(assessment.get("_id"))
-    hps = parse_number(assessment.get("totalItems"))
+    assessment_id = mongo_id(
+        assessment.get("_id")
+    )
 
-    if not assessment_id or hps is None or hps <= 0:
+    hps = parse_number(
+        assessment.get("totalItems")
+    )
+
+    if (
+        not assessment_id
+        or hps is None
+        or hps <= 0
+    ):
+
+        rules_applied["invalid_assessments"] += 1
+
+        write_quarantine_record(
+            batch_id=batch_id,
+            rule_id="TR-003",
+            reason="Assessment has a missing ID or invalid HPS",
+            record_reference={
+                "student_id": mongo_id(
+                    student.get("_id")
+                ),
+                "assessment_id": assessment_id,
+            },
+        )
+
         return {
             "status": "INCOMPLETE",
             "assessment_id": assessment_id,
@@ -490,13 +940,27 @@ def calculate_single_assessment(
             "percentage": None,
         }
 
-    student_id = mongo_id(student.get("_id"))
-    score_key = (student_id, assessment_id)
+    score, score_status = get_student_assessment_score(
+        student,
+        assessment,
+        score_lookup,
+        rules_applied,
+        batch_id,
+    )
 
-    if score_key not in score_lookup:
-        rules_applied["missing_score_defaulted_to_zero"] += 1
+    if score_status != "COMPLETE":
 
-    score = score_lookup.get(score_key, 0)
+        return {
+            "status": "INCOMPLETE",
+            "assessment_id": assessment_id,
+            "score": None,
+            "hps": rounded(hps),
+            "percentage": None,
+        }
+
+    percentage = (
+        score / hps
+    ) * 100
 
     rules_applied["single_assessment_percentage_calculation"] += 1
 
@@ -505,7 +969,7 @@ def calculate_single_assessment(
         "assessment_id": assessment_id,
         "score": rounded(score),
         "hps": rounded(hps),
-        "percentage": rounded((score / hps) * 100),
+        "percentage": rounded(percentage),
     }
 
 
@@ -520,65 +984,96 @@ def calculate_term_result(
     assessments,
     score_lookup,
     rules_applied,
+    batch_id,
 ):
-    """Calculate the available grading components for one term."""
+    """Calculate grading components for one student and term."""
 
-    applicable = [
-        assessment
-        for assessment in assessments
-        if assessment.get("term") == term
-        and mongo_id(assessment.get("subjectId"))
-        == mongo_id(subject.get("_id"))
-        and assessment_applies_to_student(assessment, student)
-    ]
+    applicable = get_applicable_assessments(
+        student=student,
+        subject=subject,
+        term=term,
+        assessments=assessments,
+        rules_applied=rules_applied,
+    )
 
     written_work_assessments = [
-        assessment for assessment in applicable
-        if get_assessment_category(assessment) == "written_work"
+        assessment
+        for assessment in applicable
+        if get_assessment_category(assessment)
+        == "written_work"
     ]
 
     performance_task_assessments = [
-        assessment for assessment in applicable
-        if get_assessment_category(assessment) == "performance_task"
+        assessment
+        for assessment in applicable
+        if get_assessment_category(assessment)
+        == "performance_task"
     ]
 
     summative_assessments = [
-        assessment for assessment in applicable
-        if get_assessment_category(assessment) == "summative_test"
+        assessment
+        for assessment in applicable
+        if get_assessment_category(assessment)
+        == "summative_test"
     ]
 
     term_exam_assessments = [
-        assessment for assessment in applicable
-        if get_assessment_category(assessment) == "term_exam"
+        assessment
+        for assessment in applicable
+        if get_assessment_category(assessment)
+        == "term_exam"
     ]
+
+    # --------------------------------------------------------
+    # Written Work
+    # --------------------------------------------------------
 
     written_work = calculate_category(
         written_work_assessments,
         student,
         score_lookup,
         rules_applied,
+        batch_id,
     )
+
+    # --------------------------------------------------------
+    # Performance Task
+    # --------------------------------------------------------
 
     performance_task = calculate_category(
         performance_task_assessments,
         student,
         score_lookup,
         rules_applied,
+        batch_id,
     )
+
+    # --------------------------------------------------------
+    # Summative Test and Term Exam
+    # --------------------------------------------------------
 
     st1_assessment = find_sequence_assessment(
         summative_assessments,
         1,
+        student,
+        rules_applied,
+        batch_id,
     )
 
     st2_assessment = find_sequence_assessment(
         summative_assessments,
         2,
+        student,
+        rules_applied,
+        batch_id,
     )
 
     term_exam_assessment = find_sequence_assessment(
         term_exam_assessments,
         1,
+        student,
+        rules_applied,
+        batch_id,
     )
 
     st1 = calculate_single_assessment(
@@ -586,6 +1081,7 @@ def calculate_term_result(
         student,
         score_lookup,
         rules_applied,
+        batch_id,
     )
 
     st2 = calculate_single_assessment(
@@ -593,6 +1089,7 @@ def calculate_term_result(
         student,
         score_lookup,
         rules_applied,
+        batch_id,
     )
 
     term_exam = calculate_single_assessment(
@@ -600,6 +1097,7 @@ def calculate_term_result(
         student,
         score_lookup,
         rules_applied,
+        batch_id,
     )
 
     summative_complete = all(
@@ -608,96 +1106,199 @@ def calculate_term_result(
     )
 
     summative_percentage = None
-    summative_weighted_score = None
 
     if summative_complete:
+
         summative_percentage = (
             st1["percentage"] * ST1_WEIGHT
             + st2["percentage"] * ST2_WEIGHT
             + term_exam["percentage"] * TERM_EXAM_WEIGHT
         )
 
-        summative_weighted_score = (
-            summative_percentage * SUMMATIVE_WEIGHT
-        )
+        rules_applied["summative_percentage_calculation"] += 1
 
-        rules_applied["summative_weighted_calculation"] += 1
+    # --------------------------------------------------------
+    # Determine Applicable Grading Components
+    # --------------------------------------------------------
 
-    written_work_weighted_score = None
+    grading_components = [
+        {
+            "name": "written_work",
+            "status": written_work["status"],
+            "percentage": written_work["percentage"],
+            "weight": WRITTEN_WORK_WEIGHT,
+        },
+        {
+            "name": "performance_task",
+            "status": performance_task["status"],
+            "percentage": performance_task["percentage"],
+            "weight": PERFORMANCE_TASK_WEIGHT,
+        },
+        {
+            "name": "summative_test",
+            "status": (
+                "COMPLETE"
+                if summative_complete
+                else "INCOMPLETE"
+            ),
+            "percentage": summative_percentage,
+            "weight": SUMMATIVE_WEIGHT,
+        },
+    ]
 
-    if written_work["status"] == "COMPLETE":
-        written_work_weighted_score = (
-            written_work["percentage"] * WRITTEN_WORK_WEIGHT
-        )
-        rules_applied["written_work_weighted_calculation"] += 1
+    applicable_components = [
+        component
+        for component in grading_components
+        if component["status"] != "NOT_APPLICABLE"
+    ]
 
-    performance_task_weighted_score = None
-
-    if performance_task["status"] == "COMPLETE":
-        performance_task_weighted_score = (
-            performance_task["percentage"]
-            * PERFORMANCE_TASK_WEIGHT
-        )
-        rules_applied["performance_task_weighted_calculation"] += 1
+    # Summative is required for an initial grade.
+    summative_required_and_complete = (
+        summative_complete
+        and bool(st1_assessment)
+        and bool(st2_assessment)
+        and bool(term_exam_assessment)
+    )
 
     components_complete = (
-        written_work["status"] == "COMPLETE"
-        and performance_task["status"] == "COMPLETE"
-        and summative_complete
+        summative_required_and_complete
+        and all(
+            component["status"] == "COMPLETE"
+            for component in applicable_components
+        )
     )
 
     initial_grade = None
+    effective_weights = {}
+
+    written_work_weighted_score = None
+    performance_task_weighted_score = None
+    summative_weighted_score = None
+
+    # --------------------------------------------------------
+    # Calculate Initial Grade with Normalized Weights
+    # --------------------------------------------------------
 
     if components_complete:
-        initial_grade = (
-            written_work_weighted_score
-            + performance_task_weighted_score
-            + summative_weighted_score
+
+        total_applicable_weight = sum(
+            component["weight"]
+            for component in applicable_components
         )
 
-        rules_applied["initial_grade_calculation"] += 1
+        if total_applicable_weight > 0:
+
+            for component in applicable_components:
+
+                effective_weight = (
+                    component["weight"]
+                    / total_applicable_weight
+                )
+
+                effective_weights[component["name"]] = rounded(
+                    effective_weight
+                )
+
+                weighted_score = (
+                    component["percentage"]
+                    * effective_weight
+                )
+
+                if component["name"] == "written_work":
+                    written_work_weighted_score = weighted_score
+
+                elif component["name"] == "performance_task":
+                    performance_task_weighted_score = weighted_score
+
+                elif component["name"] == "summative_test":
+                    summative_weighted_score = weighted_score
+
+            initial_grade = sum(
+                component["percentage"]
+                * component["weight"]
+                / total_applicable_weight
+                for component in applicable_components
+            )
+
+            rules_applied["initial_grade_calculation"] += 1
+
+    # --------------------------------------------------------
+    # Build Term Result
+    # --------------------------------------------------------
+
+    assessment_count = (
+        len(written_work_assessments)
+        + len(performance_task_assessments)
+        + len(summative_assessments)
+        + len(term_exam_assessments)
+    )
 
     return {
         "term": term,
+
+        "assessment_count": assessment_count,
+
         "status": (
             "COMPLETE"
             if components_complete
             else "INCOMPLETE"
         ),
+
         "components": {
             "written_work": {
                 **written_work,
                 "weight": WRITTEN_WORK_WEIGHT,
+                "effective_weight": effective_weights.get(
+                    "written_work"
+                ),
                 "weighted_score": rounded(
                     written_work_weighted_score
                 ),
             },
+
             "performance_task": {
                 **performance_task,
                 "weight": PERFORMANCE_TASK_WEIGHT,
+                "effective_weight": effective_weights.get(
+                    "performance_task"
+                ),
                 "weighted_score": rounded(
                     performance_task_weighted_score
                 ),
             },
+
             "summative_test": {
                 "status": (
                     "COMPLETE"
                     if summative_complete
                     else "INCOMPLETE"
                 ),
+
                 "st1": st1,
                 "st2": st2,
                 "term_exam": term_exam,
+
                 "component_percentage": rounded(
                     summative_percentage
                 ),
+
                 "weight": SUMMATIVE_WEIGHT,
+
+                "effective_weight": effective_weights.get(
+                    "summative_test"
+                ),
+
                 "weighted_score": rounded(
                     summative_weighted_score
                 ),
             },
         },
+
+        "effective_weights": effective_weights,
+
         "initial_grade": rounded(initial_grade),
+
+        # Transmutation is a separate pending stage.
         "term_grade": None,
         "term_grade_status": "AWAITING_TRANSMUTATION",
     }
@@ -713,21 +1314,23 @@ def validate_transformation_outputs(
     excluded_records,
     metadata,
 ):
-    """
-    Perform basic checks on generated transformation outputs.
-    """
+    """Validate generated transformation outputs."""
+
     checks = {}
 
     checks["student_results_generated"] = isinstance(
-        student_results, list
+        student_results,
+        list,
     )
 
     checks["term_results_generated"] = isinstance(
-        term_results, list
+        term_results,
+        list,
     )
 
     checks["excluded_records_generated"] = isinstance(
-        excluded_records, list
+        excluded_records,
+        list,
     )
 
     checks["term_results_have_required_fields"] = all(
@@ -752,7 +1355,12 @@ def validate_transformation_outputs(
     failed = len(checks) - passed
 
     return {
-        "status": "SUCCESS" if failed == 0 else "FAILED",
+        "status": (
+            "SUCCESS"
+            if failed == 0
+            else "FAILED"
+        ),
+
         "checks_passed": passed,
         "checks_failed": failed,
         "checks": checks,
@@ -766,9 +1374,11 @@ def validate_transformation_outputs(
 @task
 def transform_data():
     """Transform cleaned EduLITE records and log batch metadata."""
+
     ensure_directories()
 
     metadata = create_transformation_metadata()
+
     started_at = time.perf_counter()
 
     logger.info(
@@ -777,6 +1387,11 @@ def transform_data():
     )
 
     try:
+
+        # ----------------------------------------------------
+        # Load Cleaned Data
+        # ----------------------------------------------------
+
         data = load_cleaned_data()
 
         sections = data["sections"]
@@ -785,16 +1400,24 @@ def transform_data():
         assessments = data["assessments"]
         scores = data["assessmentScores"]
 
-        metadata["batch_window"] = get_batch_window(assessments)
+        metadata["batch_window"] = get_batch_window(
+            assessments
+        )
 
-        metadata["table_name"]["source"] = [
-            f"{collection}.json"
-            for collection in COLLECTIONS
-        ]
+        # ----------------------------------------------------
+        # Build Lookups
+        # ----------------------------------------------------
 
         section_lookup = {
             mongo_id(section.get("_id")): section
             for section in sections
+            if mongo_id(section.get("_id"))
+        }
+
+        subject_lookup = {
+            mongo_id(subject.get("_id")): subject
+            for subject in subjects
+            if mongo_id(subject.get("_id"))
         }
 
         score_lookup = build_score_lookup(scores)
@@ -805,38 +1428,72 @@ def transform_data():
 
         rules_applied = defaultdict(int)
 
-        # Each student-subject-term combination is one
-        # transformation record for reconciliation.
-        records_read = (
-            len(students) * len(subjects) * len(TERM_NUMBERS)
-        )
-
+        records_read = 0
         rejected_combinations = 0
 
+        # ----------------------------------------------------
+        # Process Students
+        # ----------------------------------------------------
+
         for student in students:
-            student_id = mongo_id(student.get("_id"))
+
+            student_id = mongo_id(
+                student.get("_id")
+            )
+
+            assigned_subject_ids = get_student_subject_ids(
+                student
+            )
 
             section = section_lookup.get(
                 mongo_id(student.get("sectionId"))
             )
 
-            if not student_id:
-                rejected_records_for_student = (
-                    len(subjects) * len(TERM_NUMBERS)
-                )
+            student_subject_results = []
 
-                rejected_combinations += rejected_records_for_student
+            # ------------------------------------------------
+            # Students Without Assigned Subjects
+            # ------------------------------------------------
+
+            if not assigned_subject_ids:
 
                 excluded_records.append({
                     "record_type": "student",
-                    "reason": "Missing student ID",
+                    "student_id": student_id,
+                    "reason": "Student has no assigned subjects",
                 })
 
-                # Quarantine each affected student-subject-term combination.
-                for subject in subjects:
-                    subject_id = mongo_id(subject.get("_id"))
+                rules_applied["students_without_subjects"] += 1
+
+                continue
+
+            # ------------------------------------------------
+            # Process Assigned Subjects
+            # ------------------------------------------------
+
+            for subject_id in sorted(assigned_subject_ids):
+
+                subject = subject_lookup.get(subject_id)
+
+                # Count the three term combinations.
+                records_read += len(TERM_NUMBERS)
+
+                # --------------------------------------------
+                # Missing Student ID
+                # --------------------------------------------
+
+                if not student_id:
+
+                    rejected_combinations += len(TERM_NUMBERS)
+
+                    excluded_records.append({
+                        "record_type": "student",
+                        "subject_id": subject_id,
+                        "reason": "Missing student ID",
+                    })
 
                     for term in TERM_NUMBERS:
+
                         write_quarantine_record(
                             batch_id=metadata["batch_id"],
                             rule_id="TR-001",
@@ -848,38 +1505,78 @@ def transform_data():
                             },
                         )
 
-                continue
+                    continue
 
-            for subject in subjects:
-                subject_id = mongo_id(subject.get("_id"))
+                # --------------------------------------------
+                # Missing or Unknown Subject
+                # --------------------------------------------
 
-                if not subject_id:
+                if subject is None:
+
                     rejected_combinations += len(TERM_NUMBERS)
 
                     excluded_records.append({
                         "record_type": "subject",
                         "student_id": student_id,
-                        "reason": "Missing subject ID",
+                        "subject_id": subject_id,
+                        "reason": "Assigned subject was not found",
                     })
 
-                    # Quarantine each affected student-subject-term combination.
                     for term in TERM_NUMBERS:
+
                         write_quarantine_record(
                             batch_id=metadata["batch_id"],
                             rule_id="TR-002",
-                            reason="Missing subject ID",
+                            reason="Assigned subject was not found",
                             record_reference={
                                 "student_id": student_id,
-                                "subject_id": None,
+                                "subject_id": subject_id,
                                 "term": term,
                             },
                         )
 
                     continue
 
+                # --------------------------------------------
+                # Owner Validation
+                # --------------------------------------------
+
+                if not owners_match(student, subject):
+
+                    rejected_combinations += len(TERM_NUMBERS)
+
+                    excluded_records.append({
+                        "record_type": "student_subject",
+                        "student_id": student_id,
+                        "subject_id": subject_id,
+                        "reason": "Student and subject owner mismatch",
+                    })
+
+                    for term in TERM_NUMBERS:
+
+                        write_quarantine_record(
+                            batch_id=metadata["batch_id"],
+                            rule_id="TR-005",
+                            reason="Student and subject owner mismatch",
+                            record_reference={
+                                "student_id": student_id,
+                                "subject_id": subject_id,
+                                "term": term,
+                            },
+                        )
+
+                    rules_applied["owner_mismatch"] += 1
+
+                    continue
+
+                # --------------------------------------------
+                # Calculate Each Term
+                # --------------------------------------------
+
                 student_term_results = []
 
                 for term in TERM_NUMBERS:
+
                     result = calculate_term_result(
                         student=student,
                         subject=subject,
@@ -887,75 +1584,106 @@ def transform_data():
                         assessments=assessments,
                         score_lookup=score_lookup,
                         rules_applied=rules_applied,
+                        batch_id=metadata["batch_id"],
                     )
 
                     result_record = {
                         "student_id": student_id,
                         "student_name": student.get("name"),
+
                         "grade_level": student.get("grade"),
+
                         "section_id": mongo_id(
                             student.get("sectionId")
                         ),
+
                         "section_name": (
                             section.get("name")
-                            if section else None
+                            if section
+                            else None
                         ),
+
                         "subject_id": subject_id,
                         "subject_name": subject.get("name"),
+
                         **result,
                     }
 
                     term_results.append(result_record)
-                    student_term_results.append(result_record)
 
-                all_terms_have_grades = all(
-                    result["term_grade"] is not None
+                    student_term_results.append(
+                        result_record
+                    )
+
+                # --------------------------------------------
+                # Final Grade Status
+                # --------------------------------------------
+
+                all_initial_grades_available = all(
+                    result["initial_grade"] is not None
                     for result in student_term_results
                 )
 
+                # Final grade cannot be calculated until
+                # term-grade transmutation is implemented.
                 final_grade = None
 
-                if all_terms_have_grades:
-                    final_grade = round(
-                        sum(
-                            result["term_grade"]
-                            for result in student_term_results
-                        ) / 3
+                if all_initial_grades_available:
+
+                    final_grade_status = (
+                        "AWAITING_TRANSMUTATION"
                     )
 
-                    rules_applied["final_grade_calculation"] += 1
+                else:
 
-                student_results.append({
+                    final_grade_status = "INCOMPLETE"
+
+                student_subject_results.append({
                     "student_id": student_id,
                     "student_name": student.get("name"),
+
                     "grade_level": student.get("grade"),
+
                     "section_id": mongo_id(
                         student.get("sectionId")
                     ),
+
                     "section_name": (
                         section.get("name")
-                        if section else None
+                        if section
+                        else None
                     ),
+
                     "subject_id": subject_id,
                     "subject_name": subject.get("name"),
+
                     "terms": student_term_results,
+
                     "final_grade": final_grade,
-                    "final_grade_status": (
-                        "COMPLETE"
-                        if all_terms_have_grades
-                        else "INCOMPLETE"
-                    ),
+                    "final_grade_status": final_grade_status,
                 })
+
+            student_results.extend(
+                student_subject_results
+            )
 
         # ----------------------------------------------------
         # Record Processing Counts
         # ----------------------------------------------------
 
         metadata["records_read"] = records_read
-        metadata["records_output"] = len(term_results)
-        metadata["records_rejected"] = rejected_combinations
 
-        metadata["rules_applied"] = dict(rules_applied)
+        metadata["records_output"] = len(
+            term_results
+        )
+
+        metadata["records_rejected"] = (
+            rejected_combinations
+        )
+
+        metadata["rules_applied"] = dict(
+            rules_applied
+        )
 
         # ----------------------------------------------------
         # Save Transformed Outputs
@@ -989,25 +1717,40 @@ def transform_data():
             )
         )
 
-        if metadata["validation_results"]["status"] == "FAILED":
+        if (
+            metadata["validation_results"]["status"]
+            == "FAILED"
+        ):
+
             metadata["status"] = "FAILED"
+
             raise ValueError(
                 "Transformation output validation failed."
             )
 
-        # Incomplete term grades are expected when required
-        # assessments are unavailable or transmutation is pending.
+        # ----------------------------------------------------
+        # Count Incomplete Terms
+        # ----------------------------------------------------
+
         incomplete_terms = sum(
             result["status"] == "INCOMPLETE"
             for result in term_results
         )
 
-        metadata["status"] = (
-            "WARNING" if incomplete_terms > 0 else "SUCCESS"
-        )
+        metadata["validation_results"][
+            "incomplete_term_results"
+        ] = incomplete_terms
 
-        metadata["validation_results"]["incomplete_term_results"] = (
-            incomplete_terms
+        # ----------------------------------------------------
+        # Final Transformation Status
+        # ----------------------------------------------------
+
+        # Incomplete terms are warnings because missing
+        # required assessments may prevent grade calculation.
+        metadata["status"] = (
+            "WARNING"
+            if incomplete_terms > 0
+            else "SUCCESS"
         )
 
         logger.info(
@@ -1015,18 +1758,33 @@ def transform_data():
             metadata["status"],
         )
 
+        logger.info(
+            "Records read: %s | Output: %s | Rejected: %s",
+            metadata["records_read"],
+            metadata["records_output"],
+            metadata["records_rejected"],
+        )
+
         return metadata
 
     except Exception as error:
+
         metadata["status"] = "FAILED"
+
         metadata["error_message"] = str(error)
+
         metadata["error_code"] = type(error).__name__
 
-        logger.exception("Transformation failed.")
+        logger.exception(
+            "Transformation failed."
+        )
+
         raise
 
     finally:
+
         metadata["end_time"] = get_timestamp()
+
         metadata["duration_seconds"] = round(
             time.perf_counter() - started_at,
             2,
@@ -1048,6 +1806,7 @@ def transform_data():
 @flow(name="EduLITE Assessment Analytics Transformation")
 def transformation_flow():
     """Prefect flow entry point."""
+
     return transform_data()
 
 

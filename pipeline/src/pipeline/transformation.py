@@ -1,6 +1,8 @@
 
 import json
 import logging
+import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,12 +23,26 @@ LOG_DIR = PIPELINE_DIR / "data" / "logs"
 
 TRANSFORMATION_LOG = LOG_DIR / "transformation_logs.jsonl"
 
+# Extraction log files to check for the parent run ID.
+EXTRACTION_LOG_FILES = [
+    LOG_DIR / "extraction_logs.jsonl",
+    LOG_DIR / "extraction_log.jsonl",
+]
+
+CODE_VERSION = "1.0.0"
+
 COLLECTIONS = [
     "sections",
     "subjects",
     "students",
     "assessments",
     "assessmentScores",
+]
+
+OUTPUT_FILES = [
+    "student_subject_results.json",
+    "term_grade_results.json",
+    "excluded_records.json",
 ]
 
 TERM_NUMBERS = [1, 2, 3]
@@ -38,7 +54,7 @@ VALID_CATEGORIES = {
     "term_exam",
 }
 
-# Weights used in the EduLITE grading formula.
+# EduLITE grading weights.
 WRITTEN_WORK_WEIGHT = 0.20
 PERFORMANCE_TASK_WEIGHT = 0.50
 SUMMATIVE_WEIGHT = 0.30
@@ -47,9 +63,100 @@ ST1_WEIGHT = 0.30
 ST2_WEIGHT = 0.30
 TERM_EXAM_WEIGHT = 0.40
 
-# Configure logging.
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Metadata Helpers
+# ============================================================
+
+def get_timestamp():
+    """Return the current UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def get_parent_run_id():
+    """Get the latest successful extraction pipeline run ID."""
+
+    extraction_log = LOG_DIR / "extraction_logs.jsonl"
+
+    if not extraction_log.exists():
+        return None
+
+    successful_runs = []
+
+    with open(extraction_log, "r", encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+
+            try:
+                entry = json.loads(line)
+
+                # Use only the overall pipeline summary
+                if (
+                    entry.get("table_or_file_name") == "PIPELINE_SUMMARY"
+                    and entry.get("extraction_status") == "SUCCESS"
+                ):
+                    successful_runs.append(entry)
+
+            except json.JSONDecodeError:
+                logging.warning("Invalid JSON entry in extraction log.")
+
+    if not successful_runs:
+        return None
+
+    # Get the most recent successful extraction run
+    latest_run = max(
+        successful_runs,
+        key=lambda entry: entry.get("extraction_end_timestamp", "")
+    )
+
+    return latest_run.get("pipeline_run_id")
+
+def create_transformation_metadata():
+    """Create metadata for a new transformation batch."""
+    timestamp = datetime.now(timezone.utc)
+
+    run_id = f"TRN_{timestamp.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    return {
+        "run_id": run_id,
+        "parent_run_id": get_parent_run_id(),
+        "batch_id": f"BATCH_{uuid.uuid4().hex[:12].upper()}",
+        "batch_window": {
+            "start_date": None,
+            "end_date": None,
+        },
+        "table_name": {
+            "source": [
+                f"{collection}.json"
+                for collection in COLLECTIONS
+            ],
+            "output": OUTPUT_FILES,
+        },
+        "start_time": get_timestamp(),
+        "end_time": None,
+        "status": "RUNNING",
+        "records_read": 0,
+        "records_output": 0,
+        "records_rejected": 0,
+        "rules_applied": {},
+        "validation_results": {},
+        "error_message": None,
+        "error_code": None,
+        "duration_seconds": 0,
+        "code_version": CODE_VERSION,
+    }
+
+
+def write_log(entry):
+    """Append one transformation metadata record as JSON Lines."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with TRANSFORMATION_LOG.open("a", encoding="utf-8") as file:
+        file.write(json_util.dumps(entry) + "\n")
 
 
 # ============================================================
@@ -93,10 +200,7 @@ def load_cleaned_data():
 
 
 def mongo_id(value):
-    """
-    Convert MongoDB ObjectId values to strings so IDs can be
-    compared consistently across collections.
-    """
+    """Convert MongoDB ObjectIds to strings."""
     if value is None:
         return None
 
@@ -115,11 +219,9 @@ def parse_number(value):
             return None
 
     try:
-        number = float(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
-
-    return number
 
 
 def rounded(value, places=2):
@@ -142,12 +244,42 @@ def write_json(file_path, data):
         )
 
 
-def write_log(entry):
-    """Append one transformation log entry as JSON Lines."""
-    with TRANSFORMATION_LOG.open("a", encoding="utf-8") as file:
-        file.write(
-            json.dumps(entry, ensure_ascii=False) + "\n"
-        )
+def get_batch_window(assessments):
+    """
+    Determine the earliest and latest assessment dates
+    included in the transformation batch.
+    """
+    dates = []
+
+    for assessment in assessments:
+        value = assessment.get("date")
+
+        if isinstance(value, datetime):
+            dates.append(value.date())
+
+        elif hasattr(value, "year") and hasattr(value, "month"):
+            dates.append(value)
+
+        elif isinstance(value, str):
+            try:
+                dates.append(
+                    datetime.fromisoformat(
+                        value.replace("Z", "+00:00")
+                    ).date()
+                )
+            except ValueError:
+                continue
+
+    if not dates:
+        return {
+            "start_date": None,
+            "end_date": None,
+        }
+
+    return {
+        "start_date": min(dates).isoformat(),
+        "end_date": max(dates).isoformat(),
+    }
 
 
 # ============================================================
@@ -158,14 +290,8 @@ def build_score_lookup(scores):
     """
     Map each student's score for each assessment.
 
-    Expected score fields:
-        studentId
-        assessmentId
-        score
-
-    A missing or blank score is treated as zero when the
-    assessment applies to that student. The assessment's HPS
-    remains included in the denominator.
+    Missing or blank scores are treated as zero when the
+    assessment applies to the student. HPS remains included.
     """
     lookup = {}
 
@@ -190,11 +316,8 @@ def assessment_applies_to_student(assessment, student):
     """
     Check whether an assessment applies to a student.
 
-    If classSections is null or empty, the assessment is treated
-    as subject-wide.
-
-    Otherwise, the student's grade and section must match one
-    of the assessment's assigned classSections.
+    Null or empty classSections means subject-wide.
+    Otherwise, grade and section must match.
     """
     class_sections = assessment.get("classSections")
 
@@ -220,9 +343,7 @@ def assessment_applies_to_student(assessment, student):
 
 
 def get_assessment_category(assessment):
-    """
-    Use the official category field, not the legacy type field.
-    """
+    """Use the official category field, not the legacy type field."""
     category = assessment.get("category")
 
     if category not in VALID_CATEGORIES:
@@ -235,15 +356,16 @@ def get_assessment_category(assessment):
 # Category Calculations
 # ============================================================
 
-def calculate_category(assessments, student, score_lookup):
+def calculate_category(
+    assessments,
+    student,
+    score_lookup,
+    rules_applied,
+):
     """
-    Calculate one category percentage.
+    Calculate category percentage.
 
     Percentage = total earned score / total HPS * 100
-
-    All applicable assessments in the category are included.
-    An assessment with no score record contributes zero earned
-    points while its HPS remains included.
     """
     total_score = 0.0
     total_hps = 0.0
@@ -258,10 +380,12 @@ def calculate_category(assessments, student, score_lookup):
         if not assessment_id or hps is None or hps <= 0:
             continue
 
-        score = score_lookup.get(
-            (student_id, assessment_id),
-            0,
-        )
+        score_key = (student_id, assessment_id)
+
+        if score_key not in score_lookup:
+            rules_applied["missing_score_defaulted_to_zero"] += 1
+
+        score = score_lookup.get(score_key, 0)
 
         total_score += score
         total_hps += hps
@@ -276,14 +400,15 @@ def calculate_category(assessments, student, score_lookup):
             "percentage": None,
         }
 
+    percentage = (total_score / total_hps) * 100
+    rules_applied["category_percentage_calculation"] += 1
+
     return {
         "status": "COMPLETE",
         "assessment_count": assessment_count,
         "total_score": rounded(total_score),
         "total_hps": rounded(total_hps),
-        "percentage": rounded(
-            (total_score / total_hps) * 100
-        ),
+        "percentage": rounded(percentage),
     }
 
 
@@ -295,8 +420,6 @@ def find_sequence_assessment(assessments, sequence):
         if assessment.get("sequence") == sequence
     ]
 
-    # Multiple matching assessments would make the summative
-    # component ambiguous, so do not select one arbitrarily.
     if len(matches) != 1:
         return None
 
@@ -307,6 +430,7 @@ def calculate_single_assessment(
     assessment,
     student,
     score_lookup,
+    rules_applied,
 ):
     """Calculate the percentage for one ST or Term Exam."""
     if assessment is None:
@@ -331,11 +455,14 @@ def calculate_single_assessment(
         }
 
     student_id = mongo_id(student.get("_id"))
+    score_key = (student_id, assessment_id)
 
-    score = score_lookup.get(
-        (student_id, assessment_id),
-        0,
-    )
+    if score_key not in score_lookup:
+        rules_applied["missing_score_defaulted_to_zero"] += 1
+
+    score = score_lookup.get(score_key, 0)
+
+    rules_applied["single_assessment_percentage_calculation"] += 1
 
     return {
         "status": "COMPLETE",
@@ -356,6 +483,7 @@ def calculate_term_result(
     term,
     assessments,
     score_lookup,
+    rules_applied,
 ):
     """Calculate the available grading components for one term."""
 
@@ -392,12 +520,14 @@ def calculate_term_result(
         written_work_assessments,
         student,
         score_lookup,
+        rules_applied,
     )
 
     performance_task = calculate_category(
         performance_task_assessments,
         student,
         score_lookup,
+        rules_applied,
     )
 
     st1_assessment = find_sequence_assessment(
@@ -419,22 +549,23 @@ def calculate_term_result(
         st1_assessment,
         student,
         score_lookup,
+        rules_applied,
     )
 
     st2 = calculate_single_assessment(
         st2_assessment,
         student,
         score_lookup,
+        rules_applied,
     )
 
     term_exam = calculate_single_assessment(
         term_exam_assessment,
         student,
         score_lookup,
+        rules_applied,
     )
 
-    # The summative component is complete only when ST1, ST2,
-    # and the Term Exam each have exactly one valid assessment.
     summative_complete = all(
         component["status"] == "COMPLETE"
         for component in (st1, st2, term_exam)
@@ -454,21 +585,25 @@ def calculate_term_result(
             summative_percentage * SUMMATIVE_WEIGHT
         )
 
+        rules_applied["summative_weighted_calculation"] += 1
+
     written_work_weighted_score = None
+
     if written_work["status"] == "COMPLETE":
         written_work_weighted_score = (
             written_work["percentage"] * WRITTEN_WORK_WEIGHT
         )
+        rules_applied["written_work_weighted_calculation"] += 1
 
     performance_task_weighted_score = None
+
     if performance_task["status"] == "COMPLETE":
         performance_task_weighted_score = (
             performance_task["percentage"]
             * PERFORMANCE_TASK_WEIGHT
         )
+        rules_applied["performance_task_weighted_calculation"] += 1
 
-    # Do not claim an official Initial Grade unless every
-    # required component can be calculated.
     components_complete = (
         written_work["status"] == "COMPLETE"
         and performance_task["status"] == "COMPLETE"
@@ -483,6 +618,8 @@ def calculate_term_result(
             + performance_task_weighted_score
             + summative_weighted_score
         )
+
+        rules_applied["initial_grade_calculation"] += 1
 
     return {
         "term": term,
@@ -525,10 +662,64 @@ def calculate_term_result(
             },
         },
         "initial_grade": rounded(initial_grade),
-        # This script intentionally does not invent a
-        # transmutation table. See notes below.
         "term_grade": None,
         "term_grade_status": "AWAITING_TRANSMUTATION",
+    }
+
+
+# ============================================================
+# Transformation Validation
+# ============================================================
+
+def validate_transformation_outputs(
+    student_results,
+    term_results,
+    excluded_records,
+    metadata,
+):
+    """
+    Perform basic checks on generated transformation outputs.
+    """
+    checks = {}
+
+    checks["student_results_generated"] = isinstance(
+        student_results, list
+    )
+
+    checks["term_results_generated"] = isinstance(
+        term_results, list
+    )
+
+    checks["excluded_records_generated"] = isinstance(
+        excluded_records, list
+    )
+
+    checks["term_results_have_required_fields"] = all(
+        result.get("student_id")
+        and result.get("subject_id")
+        and result.get("term") in TERM_NUMBERS
+        for result in term_results
+    )
+
+    checks["term_result_count_reconciled"] = (
+        metadata["records_read"]
+        == metadata["records_output"]
+        + metadata["records_rejected"]
+    )
+
+    checks["output_files_exist"] = all(
+        (TRANSFORMED_DIR / filename).exists()
+        for filename in OUTPUT_FILES
+    )
+
+    passed = sum(checks.values())
+    failed = len(checks) - passed
+
+    return {
+        "status": "SUCCESS" if failed == 0 else "FAILED",
+        "checks_passed": passed,
+        "checks_failed": failed,
+        "checks": checks,
     }
 
 
@@ -538,13 +729,16 @@ def calculate_term_result(
 
 @task
 def transform_data():
-    """Transform cleaned EduLITE records into grading results."""
+    """Transform cleaned EduLITE records and log batch metadata."""
     ensure_directories()
 
-    started_at = datetime.now(timezone.utc)
-    run_id = started_at.strftime("TRN_%Y%m%d_%H%M%S")
+    metadata = create_transformation_metadata()
+    started_at = time.perf_counter()
 
-    logger.info("Starting transformation run: %s", run_id)
+    logger.info(
+        "Starting transformation batch: %s",
+        metadata["batch_id"],
+    )
 
     try:
         data = load_cleaned_data()
@@ -555,14 +749,16 @@ def transform_data():
         assessments = data["assessments"]
         scores = data["assessmentScores"]
 
+        metadata["batch_window"] = get_batch_window(assessments)
+
+        metadata["table_name"]["source"] = [
+            f"{collection}.json"
+            for collection in COLLECTIONS
+        ]
+
         section_lookup = {
             mongo_id(section.get("_id")): section
             for section in sections
-        }
-
-        subject_lookup = {
-            mongo_id(subject.get("_id")): subject
-            for subject in subjects
         }
 
         score_lookup = build_score_lookup(scores)
@@ -570,6 +766,16 @@ def transform_data():
         student_results = []
         term_results = []
         excluded_records = []
+
+        rules_applied = defaultdict(int)
+
+        # Each student-subject-term combination is one
+        # transformation record for reconciliation.
+        records_read = (
+            len(students) * len(subjects) * len(TERM_NUMBERS)
+        )
+
+        rejected_combinations = 0
 
         for student in students:
             student_id = mongo_id(student.get("_id"))
@@ -579,6 +785,12 @@ def transform_data():
             )
 
             if not student_id:
+                rejected_records_for_student = (
+                    len(subjects) * len(TERM_NUMBERS)
+                )
+
+                rejected_combinations += rejected_records_for_student
+
                 excluded_records.append({
                     "record_type": "student",
                     "reason": "Missing student ID",
@@ -589,6 +801,13 @@ def transform_data():
                 subject_id = mongo_id(subject.get("_id"))
 
                 if not subject_id:
+                    rejected_combinations += len(TERM_NUMBERS)
+
+                    excluded_records.append({
+                        "record_type": "subject",
+                        "student_id": student_id,
+                        "reason": "Missing subject ID",
+                    })
                     continue
 
                 student_term_results = []
@@ -600,6 +819,7 @@ def transform_data():
                         term=term,
                         assessments=assessments,
                         score_lookup=score_lookup,
+                        rules_applied=rules_applied,
                     )
 
                     result_record = {
@@ -621,8 +841,6 @@ def transform_data():
                     term_results.append(result_record)
                     student_term_results.append(result_record)
 
-                # A final grade is calculated only when all three
-                # transmuted term grades are available.
                 all_terms_have_grades = all(
                     result["term_grade"] is not None
                     for result in student_term_results
@@ -637,6 +855,8 @@ def transform_data():
                             for result in student_term_results
                         ) / 3
                     )
+
+                    rules_applied["final_grade_calculation"] += 1
 
                 student_results.append({
                     "student_id": student_id,
@@ -660,7 +880,20 @@ def transform_data():
                     ),
                 })
 
-        # Save detailed results and term-level results separately.
+        # ----------------------------------------------------
+        # Record Processing Counts
+        # ----------------------------------------------------
+
+        metadata["records_read"] = records_read
+        metadata["records_output"] = len(term_results)
+        metadata["records_rejected"] = rejected_combinations
+
+        metadata["rules_applied"] = dict(rules_applied)
+
+        # ----------------------------------------------------
+        # Save Transformed Outputs
+        # ----------------------------------------------------
+
         write_json(
             TRANSFORMED_DIR / "student_subject_results.json",
             student_results,
@@ -671,62 +904,79 @@ def transform_data():
             term_results,
         )
 
-        finished_at = datetime.now(timezone.utc)
-
-        log_entry = {
-            "run_id": run_id,
-            "stage": "transformation",
-            "status": "SUCCESS",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "duration_seconds": round(
-                (finished_at - started_at).total_seconds(),
-                2,
-            ),
-            "input_counts": {
-                collection: len(data[collection])
-                for collection in COLLECTIONS
-            },
-            "output_counts": {
-                "student_subject_results": len(student_results),
-                "term_grade_results": len(term_results),
-                "excluded_records": len(excluded_records),
-            },
-            "complete_term_results": sum(
-                result["status"] == "COMPLETE"
-                for result in term_results
-            ),
-            "incomplete_term_results": sum(
-                result["status"] == "INCOMPLETE"
-                for result in term_results
-            ),
-        }
-
         write_json(
             TRANSFORMED_DIR / "excluded_records.json",
             excluded_records,
         )
-        write_log(log_entry)
 
-        logger.info("Transformation completed: %s", run_id)
+        # ----------------------------------------------------
+        # Validate Transformation Outputs
+        # ----------------------------------------------------
 
-        return log_entry
+        metadata["validation_results"] = (
+            validate_transformation_outputs(
+                student_results,
+                term_results,
+                excluded_records,
+                metadata,
+            )
+        )
+
+        if metadata["validation_results"]["status"] == "FAILED":
+            metadata["status"] = "FAILED"
+            raise ValueError(
+                "Transformation output validation failed."
+            )
+
+        # Incomplete term grades are expected when required
+        # assessments are unavailable or transmutation is pending.
+        incomplete_terms = sum(
+            result["status"] == "INCOMPLETE"
+            for result in term_results
+        )
+
+        metadata["status"] = (
+            "WARNING" if incomplete_terms > 0 else "SUCCESS"
+        )
+
+        metadata["validation_results"]["incomplete_term_results"] = (
+            incomplete_terms
+        )
+
+        logger.info(
+            "Transformation completed with status: %s",
+            metadata["status"],
+        )
+
+        return metadata
 
     except Exception as error:
-        finished_at = datetime.now(timezone.utc)
-
-        write_log({
-            "run_id": run_id,
-            "stage": "transformation",
-            "status": "FAILED",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "error": str(error),
-        })
+        metadata["status"] = "FAILED"
+        metadata["error_message"] = str(error)
+        metadata["error_code"] = type(error).__name__
 
         logger.exception("Transformation failed.")
         raise
 
+    finally:
+        metadata["end_time"] = get_timestamp()
+        metadata["duration_seconds"] = round(
+            time.perf_counter() - started_at,
+            2,
+        )
+
+        write_log(metadata)
+
+        logger.info(
+            "Transformation batch %s logged with status %s",
+            metadata["batch_id"],
+            metadata["status"],
+        )
+
+
+# ============================================================
+# Prefect Flow
+# ============================================================
 
 @flow(name="EduLITE Assessment Analytics Transformation")
 def transformation_flow():

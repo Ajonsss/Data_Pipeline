@@ -456,4 +456,231 @@ The transformed data must retain consistent identifiers, data types, and field n
 
 The current output is designed for student performance analytics and reporting. It does not yet implement dimensional tables, surrogate keys, or database constraints. These may be introduced during the database loading and modeling process.
 
+## 7. Transformation Validation and Data Quality Checks
+
+The Transformation Validation Stage verifies that the transformed EduLITE Assessment Analytics data is accurate, complete, consistent, and suitable for loading into the separate Supabase PostgreSQL database.
+
+This stage checks the generated student-subject results, term grade records, and excluded records to identify missing values, duplicate results, invalid references, incorrect calculations, and violations of the grading rules.
+
+The validation process also verifies that the computed assessment percentages, weighted scores, Initial Grades, available transmuted Term Grades, and Final Grades follow the prescribed grading computation rules.
+
+Validation results are classified as critical errors or non-critical warnings. Critical failures prevent the validation process from completing successfully, while non-critical warnings are recorded for review without automatically stopping the pipeline.
+
+### 7.1 Validation Checks
+
+The Transformation Validation Stage performs the following checks to ensure the accuracy and consistency of transformed data.
+
+| Check Name | Target | Purpose | Validation Criteria | Severity |
+|---|---|---|---|---|
+| Output File Check | `student_subject_results.json`, `term_grade_results.json`, `excluded_records.json` | Ensure the required transformation outputs are available. | All three files must exist, be readable, and contain valid JSON arrays. | Critical |
+| Required Field Check | `term_grade_results.json` | Ensure essential identifiers and academic term information are available. | `student_id`, `subject_id`, and `term` must not be null or empty. | Critical |
+| Key Uniqueness Check | `term_grade_results.json` | Prevent duplicate student-subject-term results. | Each combination of `student_id`, `subject_id`, and `term` must be unique. | Critical |
+| Student Referential Integrity | Student identifiers in transformed outputs | Ensure transformed results reference existing students. | Student IDs must match records in cleaned `students.json`. | Critical |
+| Subject Referential Integrity | Subject identifiers in transformed outputs | Ensure transformed results reference existing subjects. | Subject IDs must match records in cleaned `subjects.json`. | Critical |
+| Term Validity Check | `term_grade_results.json` | Ensure valid academic terms are used. | Term values must be integers from 1 to 3. | Critical |
+| Data Type Check | Identifiers, terms, and grade values | Ensure transformed data follows expected data types. | Identifiers must be strings, term values must be integers, and grade values must be numeric or null when incomplete. | Critical |
+| Percentage Range Check | Assessment percentage fields | Prevent invalid percentage values. | Calculated percentages must be between 0 and 100. | Critical |
+| Initial Grade Check | `term_grade_results.json` | Verify the fixed grading weights and Initial Grade calculations. | Weighted component scores must follow the 20% Written Work, 50% Performance Task, and 30% Summative rules. Initial Grade must equal the sum of the weighted component scores. | Critical |
+| Assessment Calculation Check | Nested assessment components | Verify assessment percentages and Summative component calculations. | Written Work and Performance Task percentages must be calculated using total earned scores divided by total HPS. ST1, ST2, and Term Exam must use the 30%/30%/40% distribution within the Summative component. | Critical |
+| Term Grade Transmutation Check | `term_grade_results.json.term_grade` | Verify official Term Grade conversion. | Available Term Grades must match the configured transmutation table. | Critical |
+| Pending Transmutation Warning | `term_grade_results.json.term_grade_status` | Identify Initial Grades awaiting official conversion. | Records with available Initial Grades but missing official Term Grades are reported as pending transmutation. | Non-critical |
+| Final Grade Check | `student_subject_results.json.final_grade` | Verify Final Grade calculations. | When all three transmuted Term Grades are available, Final Grade must equal their average rounded to the nearest whole number. | Critical |
+| Pending Final Grade Warning | `student_subject_results.json.final_grade_status` | Identify student-subject results without completed Final Grades. | Missing Final Grades caused by incomplete terms or unavailable transmutation results are reported for review. | Non-critical |
+| Excluded Record Check | `excluded_records.json` | Ensure excluded records are documented. | Each excluded record must contain a valid reason for exclusion. | Non-critical |
+
+The validation process checks the structure and mathematical consistency of the generated outputs.
+
+Assessment matching and sequence handling are primarily performed during the Transformation Stage. This includes selecting applicable assessments by subject and term, checking student and assessment ownership, identifying duplicate assessment sequences, and determining whether the required ST1, ST2, and Term Examination assessments are available.
+
+The Transformation Validation Stage then checks the resulting assessment calculations and grading outputs.
+
+#### Grading Computation Rules
+
+The following grading rules are used during transformation and checked against the generated results.
+
+**Written Works — 20%**
+
+Written Work Percentage = (Total Written Work Scores / Total Written Work HPS) × 100
+
+Written Work Weighted Score = Written Work Percentage × 0.20
+
+Only assessments that were actually created and are applicable to the learner are included.
+
+**Performance Tasks — 50%**
+
+Performance Task Percentage = (Total Performance Task Scores / Total Performance Task HPS) × 100
+
+Performance Task Weighted Score = Performance Task Percentage × 0.50
+
+Only applicable, created assessments are included.
+
+**Summative Tests and Term Examination — 30%**
+
+ST1 Percentage = (ST1 Score / ST1 HPS) × 100
+
+ST2 Percentage = (ST2 Score / ST2 HPS) × 100
+
+Term Exam Percentage = (Term Exam Score / Term Exam HPS) × 100
+
+Summative Component Percentage = (ST1 Percentage × 0.30) + (ST2 Percentage × 0.30) + (Term Exam Percentage × 0.40)
+
+Summative Weighted Score = Summative Component Percentage × 0.30
+
+**Initial Grade**
+
+Initial Grade = Written Work Weighted Score + Performance Task Weighted Score + Summative Weighted Score
+
+The calculation uses fixed component weights without redistributing weights between categories.
+
+When no Written Work or Performance Task assessments were created, the corresponding category contributes zero to the Initial Grade under the implemented transformation rule.
+
+If an assessment was created but the learner has no recorded score or the score is blank, the score contributes zero raw points while the assessment's HPS remains included.
+
+**Term Grade**
+
+Term Grade = Initial Grade converted using the prescribed transmutation table.
+
+The transformation implementation reads the configured transmutation ranges from `config/transmutation_table.json`.
+
+If the official table is unavailable or an Initial Grade does not match a configured range, the Term Grade remains pending rather than using an assumed conversion.
+
+**Final Grade**
+
+Final Grade = ROUND((Term 1 Grade + Term 2 Grade + Term 3 Grade) / 3)
+
+The Final Grade uses the three transmuted Term Grades, not the original Initial Grades.
+
+The implementation uses half-up rounding to produce a whole-number Final Grade.
+
+### 7.2 Record Reconciliation
+
+Record reconciliation verifies that the student-subject-term combinations and assessment calculations processed during transformation are properly accounted for.
+
+Because the Transformation Stage performs record matching, filtering, and aggregation, the number of output records is not expected to equal the number of source assessment or score records.
+
+The Transformation Stage generates term-level results for three academic terms for each valid student-subject combination.
+
+The following reconciliation principles are applied:
+
+| Reconciliation Target | Validation Rule | Purpose |
+|---|---|---|
+| Student Records | Identify students with assigned subjects and record students excluded because they have no assigned subjects. | Support traceability of student processing. |
+| Subject Records | Match assigned subject identifiers to cleaned subject records and document invalid subject assignments. | Maintain correct student-subject relationships. |
+| Student-Subject-Term Combinations | Account for generated term results and combinations rejected before term processing. | Reconcile transformation processing counts. |
+| Written Work Assessments | Calculate category scores and HPS using applicable assessments that were actually created. | Prevent incorrect score aggregation. |
+| Performance Task Assessments | Calculate category scores and HPS using applicable assessments that were actually created. | Maintain correct category calculations. |
+| Summative Assessments | Process ST1, ST2, and Term Examination using their required sequence and component weights. | Maintain accurate Summative calculations. |
+| Excluded Records | Record excluded records and their corresponding reasons. | Support investigation and traceability. |
+| Generated Outputs | Verify the existence and expected structure of the transformed JSON files. | Ensure output availability for validation and loading. |
+
+The implemented transformation reconciliation formula is:
+
+**Student-Subject-Term Combinations Considered = Term Results Generated + Combinations Rejected**
+
+The number of considered combinations is based on the three academic terms for each assigned student-subject combination that enters processing.
+
+Incomplete term results are still generated outputs and are not automatically counted as rejected combinations.
+
+Students without assigned subjects are documented separately as excluded records and do not contribute to the counted student-subject-term combinations.
+
+For assessment aggregation, the validation process checks the score and HPS values represented in the generated grading components rather than assuming that source assessment record counts must equal output record counts.
+
+This approach supports reconciliation of transformed results while accounting for the pipeline's aggregation and filtering operations.
+
+### 7.3 Severity and Validation Handling
+
+Validation checks are classified according to their potential effect on the reliability of the transformed data.
+
+**Critical Errors**
+
+Critical errors indicate that the generated data may be incorrect or unsuitable for loading.
+
+Examples include:
+
+- Missing required identifiers.
+- Duplicate student-subject-term results.
+- Invalid student or subject references.
+- Invalid term values or data types.
+- Assessment percentages outside the allowed range.
+- Incorrect grading weights or calculations.
+- Incorrect available Term Grade transmutation values.
+- Incorrect calculated Final Grades.
+- Missing or unreadable required output files.
+
+If one or more critical validation checks fail, the overall validation status is set to `FAILED`.
+
+The validation flow raises an exception to prevent the validation stage from completing successfully. The Load Stage should not proceed until the critical issues are resolved.
+
+**Non-Critical Warnings**
+
+Non-critical warnings identify issues that require review but do not automatically stop the validation flow.
+
+Examples include:
+
+- Initial Grades awaiting official transmutation.
+- Student-subject results without completed Final Grades.
+- Excluded transformation records without properly documented reasons.
+
+If non-critical checks fail and no critical failures are detected, the overall validation status becomes `WARNING`.
+
+The warnings are recorded in the validation log for investigation.
+
+**Overall Validation Status**
+
+| Status | Meaning | Handling |
+|---|---|---|
+| `SUCCESS` | All performed validation checks passed. | The validation stage completes successfully. |
+| `WARNING` | No critical failures occurred, but non-critical issues remain. | The validation stage completes and records warnings for review. |
+| `FAILED` | One or more critical validation checks failed. | The validation stage raises an error, and loading should be blocked until issues are resolved. |
+
+A `WARNING` status does not mean that all official grades have been calculated.
+
+It indicates that the performed critical validation checks passed while some grading results or supporting information remain incomplete.
+
+### 7.4 Validation Output
+
+The Transformation Validation Stage generates an execution log containing the results of its data quality checks.
+
+**Output File:** `data/logs/transformation_validation_logs.jsonl`
+
+The file uses JSON Lines format, where each validation execution produces a separate log entry.
+
+Each entry contains the following information:
+
+| Log Field | Description |
+|---|---|
+| `validation_timestamp` | Date and time when validation was performed. |
+| `overall_status` | Overall validation result: SUCCESS, WARNING, or FAILED. |
+| `checks_total` | Total number of validation checks performed. |
+| `checks_passed` | Number of checks that passed. |
+| `checks_failed` | Number of checks that failed. |
+| `critical_failures` | Number of failed critical checks. |
+| `non_critical_failures` | Number of non-critical warning checks. |
+| `term_result_count` | Number of term-level result records checked. |
+| `student_subject_result_count` | Number of student-subject result records checked. |
+| `excluded_record_count` | Number of excluded transformation records. |
+| `validation_results` | Detailed information about each validation check, including its name, target, purpose, severity, status, and details. |
+
+The validation log provides traceability by recording which checks passed or failed and identifying issues that require correction or review.
+
+The script also displays a validation summary in the terminal, including the overall status, passed and failed checks, critical failures, and warnings.
+
+### 7.5 Expected Result
+
+After transformation validation, the generated JSON files should contain consistent student and subject identifiers, valid academic terms, unique student-subject-term results, valid assessment percentages, and correctly calculated grading components and Initial Grades.
+
+When the official transmutation table is available, completed Term Grades must match the prescribed conversion ranges.
+
+Completed Final Grades must equal the average of the three transmuted Term Grades, rounded to the nearest whole number.
+
+The validation process must identify and report discrepancies in data structure, references, grading calculations, and generated outputs.
+
+The overall validation result is classified as `SUCCESS`, `WARNING`, or `FAILED`.
+
+Critical validation failures prevent the validation stage from completing successfully and should block the Load Stage until the identified issues are corrected.
+
+Non-critical warnings, including pending transmutation and incomplete Final Grades, are documented for review without automatically stopping validation.
+
+The expected outcome is a traceable validation process that confirms the reliability of available transformed data, identifies incomplete grading results, and supports controlled handover to the Supabase PostgreSQL loading stage.
+
 

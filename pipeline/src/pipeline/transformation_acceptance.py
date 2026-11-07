@@ -19,6 +19,7 @@ LOG_DIR = PIPELINE_DIR / "data" / "logs"
 
 TRANSFORMATION_LOG = LOG_DIR / "transformation_logs.jsonl"
 ACCEPTANCE_LOG = LOG_DIR / "transformation_acceptance_logs.jsonl"
+TRANSFORMATION_VALIDATION_LOG = LOG_DIR / "transformation_validation_logs.jsonl"
 
 HANDOVER_DIR = PIPELINE_DIR / "data" / "handover"
 
@@ -40,7 +41,7 @@ REQUIRED_OUTPUT_FILES = [
     "excluded_records.json",
 ]
 
-CODE_VERSION = "2.0.0"
+CODE_VERSION = "2.1.0"
 
 
 # ============================================================
@@ -165,6 +166,140 @@ def validate_record_count(value, field_name):
     return value
 
 
+def parse_utc_timestamp(value, field_name):
+    """Parse an ISO timestamp and normalize it to UTC."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Missing or invalid {field_name} timestamp.")
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"Invalid {field_name} timestamp: {value}") from error
+
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field_name} must include a timezone.")
+
+    return parsed.astimezone(timezone.utc)
+
+
+def get_latest_transformation_validation(summary):
+    """
+    Read the separate Transformation Validation log.
+
+    The current validator does not store a transformation run_id.
+    To prevent acceptance of an older validation result, require the
+    latest result to be at/after this run's completion and its output
+    record counts to match the currently evaluated outputs.
+    """
+
+    if not TRANSFORMATION_VALIDATION_LOG.is_file():
+        raise FileNotFoundError(
+            "Transformation Validation log not found: "
+            f"{TRANSFORMATION_VALIDATION_LOG}. Run transformation_validation.py first."
+        )
+
+    latest = None
+    with TRANSFORMATION_VALIDATION_LOG.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON in Transformation Validation log at line "
+                    f"{line_number}: {error}"
+                ) from error
+            if isinstance(record, dict):
+                latest = record
+
+    if latest is None:
+        raise ValueError("Transformation Validation log has no usable records.")
+
+    completed = parse_utc_timestamp(summary.get("end_time"), "transformation end_time")
+    validated = parse_utc_timestamp(
+        latest.get("validation_timestamp"), "validation_timestamp"
+    )
+    if validated < completed:
+        raise ValueError(
+            "Transformation Validation is older than the latest completed "
+            "transformation run. Rerun transformation_validation.py."
+        )
+
+    return latest
+
+
+def evaluate_separate_validation(validation, output_checks):
+    """Respect CRITICAL and NON-CRITICAL results from the validator."""
+
+    results = validation.get("validation_results")
+    if not isinstance(results, list) or not results:
+        raise ValueError("Separate validation check list is missing or empty.")
+
+    total = validate_record_count(validation.get("checks_total"), "checks_total")
+    passed = validate_record_count(validation.get("checks_passed"), "checks_passed")
+    failed = validate_record_count(validation.get("checks_failed"), "checks_failed")
+    critical_count = validate_record_count(
+        validation.get("critical_failures"), "critical_failures"
+    )
+    warning_count = validate_record_count(
+        validation.get("non_critical_failures"), "non_critical_failures"
+    )
+
+    if total != len(results) or passed + failed != total:
+        raise ValueError("Separate validation check counts are inconsistent.")
+
+    critical_errors = []
+    warnings = []
+    actual_passed = 0
+    for index, check in enumerate(results, 1):
+        if not isinstance(check, dict):
+            raise ValueError(f"Validation check #{index} is not an object.")
+        name = str(check.get("check_name") or f"Check #{index}")
+        severity = str(check.get("severity", "")).upper()
+        status = str(check.get("status", "")).upper()
+        if severity not in {"CRITICAL", "NON-CRITICAL"}:
+            raise ValueError(f"Unrecognized severity for {name}: {severity}")
+        if status not in {"PASSED", "FAILED"}:
+            raise ValueError(f"Unrecognized result for {name}: {status}")
+        if status == "PASSED":
+            actual_passed += 1
+        elif severity == "CRITICAL":
+            critical_errors.append(f"Critical check failed: {name}: {check.get('details', '')}")
+        else:
+            warnings.append(f"Non-critical check failed: {name}: {check.get('details', '')}")
+
+    if actual_passed != passed or len(critical_errors) != critical_count or len(warnings) != warning_count:
+        raise ValueError("Separate validation severities or result counts do not match the summary.")
+
+    status = str(validation.get("overall_status", "")).upper()
+    expected_status = (
+        "FAILED" if critical_errors else "WARNING" if warnings else "SUCCESS"
+    )
+    if status != expected_status:
+        raise ValueError(
+            f"Separate validation status {status!r} disagrees with its checks "
+            f"(expected {expected_status})."
+        )
+
+    # Match the validation record to the output JSON files evaluated now.
+    expected_counts = {
+        "term_result_count": output_checks["term_grade_results.json"]["record_count"],
+        "student_subject_result_count": output_checks["student_subject_results.json"]["record_count"],
+        "excluded_record_count": output_checks["excluded_records.json"]["record_count"],
+    }
+    for key, actual in expected_counts.items():
+        claimed = validate_record_count(validation.get(key), key)
+        if actual is None or claimed != actual:
+            raise ValueError(
+                f"Transformation Validation {key} ({claimed}) does not match "
+                f"the current output ({actual}). Rerun transformation validation."
+            )
+
+    return critical_errors, warnings
+
+
 # ============================================================
 # Output File Validation
 # ============================================================
@@ -254,7 +389,7 @@ def calculate_rejection_rate(records_output, records_rejected):
 # Transformation Acceptance Evaluation
 # ============================================================
 
-def evaluate_acceptance(summary, output_checks):
+def evaluate_acceptance(summary, output_checks, separate_validation):
     """
     Determine whether transformed data can proceed to Load.
 
@@ -388,6 +523,16 @@ def evaluate_acceptance(summary, output_checks):
             critical_failures.append(
                 f"Validation check failed: {check_name}"
             )
+
+    # --------------------------------------------------------
+    # 3A. Separate Transformation Validation Stage
+    # --------------------------------------------------------
+
+    separate_critical, separate_warnings = evaluate_separate_validation(
+        separate_validation, output_checks
+    )
+    critical_failures.extend(separate_critical)
+    warnings.extend(separate_warnings)
 
     # --------------------------------------------------------
     # 4. Required Output Files
@@ -570,6 +715,7 @@ def create_handover_manifest(
     decision_results,
     output_checks,
     copied_files,
+    separate_validation,
 ):
     """Create a handover manifest containing batch metadata."""
 
@@ -626,6 +772,8 @@ def create_handover_manifest(
         },
 
         "output_file_checks": output_checks,
+
+        "transformation_validation_summary": separate_validation,
 
         "output_files": copied_files,
 
@@ -687,6 +835,8 @@ def create_acceptance_log(summary, manifest, manifest_path):
         "records_rejected": manifest["record_counts"]["records_rejected"],
 
         "validation_results": manifest["validation_summary"],
+
+        "transformation_validation_summary": manifest["transformation_validation_summary"],
 
         "output_file_checks": manifest["output_file_checks"],
 
@@ -975,9 +1125,13 @@ def evaluate_transformation_acceptance():
 
     output_checks = validate_output_files()
 
+    # The independent validation stage must run after transformation.
+    separate_validation = get_latest_transformation_validation(summary)
+
     decision_results = evaluate_acceptance(
         summary,
         output_checks,
+        separate_validation,
     )
 
     decision = decision_results["acceptance_decision"]
@@ -1022,6 +1176,7 @@ def evaluate_transformation_acceptance():
         decision_results=decision_results,
         output_checks=output_checks,
         copied_files=copied_files,
+        separate_validation=separate_validation,
     )
 
     if decision == "REJECTED":

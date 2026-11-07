@@ -1,10 +1,10 @@
-
 import json
 import logging
 import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from bson import json_util
@@ -33,6 +33,9 @@ EXTRACTION_LOG_FILES = [
 ]
 
 CODE_VERSION = "2.0.0"
+
+# Supply the official school grading ranges here; never assume a table.
+TRANSMUTATION_TABLE_FILE = PIPELINE_DIR / "config" / "transmutation_table.json"
 
 COLLECTIONS = [
     "sections",
@@ -372,6 +375,82 @@ def get_batch_window(assessments):
         "start_date": min(dates).isoformat(),
         "end_date": max(dates).isoformat(),
     }
+
+
+# ============================================================
+# Official Term Grade Transmutation (additional computation)
+# ============================================================
+
+def load_transmutation_table():
+    """Read prescribed grading ranges, if the official table is configured.
+
+    Format: {"ranges": [{"min": ..., "max": ..., "grade": ...}, ...]}
+    The ranges must not overlap; grade outputs must be whole numbers 0-100.
+    No substitute or guessed table is applied when no ranges are supplied.
+    """
+    if not TRANSMUTATION_TABLE_FILE.is_file():
+        logger.warning(
+            "Official transmutation table missing: %s; term/final grades pending",
+            TRANSMUTATION_TABLE_FILE,
+        )
+        return None
+
+    with TRANSMUTATION_TABLE_FILE.open("r", encoding="utf-8") as file:
+        config = json.load(file)
+
+    rows = config.get("ranges") if isinstance(config, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("Transmutation table must contain a 'ranges' list.")
+    if not rows:
+        logger.warning("Transmutation ranges are empty; term/final grades pending")
+        return None
+
+    parsed = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or not all(
+            key in row for key in ("min", "max", "grade")
+        ):
+            raise ValueError(f"Invalid transmutation range at index {index}")
+        # Decimal(str(...)) avoids binary float boundary imprecision.
+        try:
+            low = Decimal(str(row["min"]))
+            high = Decimal(str(row["max"]))
+            grade = Decimal(str(row["grade"]))
+        except Exception as error:
+            raise ValueError(f"Invalid transmutation number at index {index}") from error
+        if not (low.is_finite() and high.is_finite() and grade.is_finite()):
+            raise ValueError(f"Nonfinite transmutation value at index {index}")
+        if low < 0 or high > 100 or low > high:
+            raise ValueError(f"Invalid transmutation boundaries at index {index}")
+        if grade != grade.to_integral_value() or not 0 <= grade <= 100:
+            raise ValueError(f"Invalid official term grade at index {index}")
+        parsed.append((low, high, int(grade)))
+
+    parsed.sort(key=lambda row: row[0])
+    for previous, current in zip(parsed, parsed[1:]):
+        if current[0] <= previous[1]:
+            raise ValueError("Official transmutation ranges must not overlap")
+    return parsed
+
+
+def transmute_initial_grade(initial_grade, table):
+    """Convert an initial grade through the configured official ranges."""
+    if initial_grade is None or table is None:
+        return None
+    value = Decimal(str(initial_grade))
+    for low, high, official_grade in table:
+        if low <= value <= high:
+            return official_grade
+    # A missing mapping must never produce an invented Term Grade.
+    return None
+
+
+def calculate_final_grade(term_grades):
+    """Round the mean of all three transmuted term grades to a whole number."""
+    if len(term_grades) != 3 or any(grade is None for grade in term_grades):
+        return None
+    average = sum(Decimal(str(grade)) for grade in term_grades) / Decimal(3)
+    return int(average.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 # ============================================================
@@ -985,6 +1064,7 @@ def calculate_term_result(
     score_lookup,
     rules_applied,
     batch_id,
+    transmutation_table=None,
 ):
     """Calculate grading components for one student and term."""
 
@@ -1176,51 +1256,48 @@ def calculate_term_result(
     summative_weighted_score = None
 
     # --------------------------------------------------------
-    # Calculate Initial Grade with Normalized Weights
+    # Calculate Initial Grade with the prescribed FIXED weights.
+    # WW and PT have no fixed assessment count. An absent category
+    # contributes zero; its weight is NOT redistributed.
     # --------------------------------------------------------
 
     if components_complete:
-
-        total_applicable_weight = sum(
-            component["weight"]
-            for component in applicable_components
-        )
-
-        if total_applicable_weight > 0:
-
-            for component in applicable_components:
-
-                effective_weight = (
-                    component["weight"]
-                    / total_applicable_weight
-                )
-
-                effective_weights[component["name"]] = rounded(
-                    effective_weight
-                )
-
-                weighted_score = (
-                    component["percentage"]
-                    * effective_weight
-                )
-
-                if component["name"] == "written_work":
-                    written_work_weighted_score = weighted_score
-
-                elif component["name"] == "performance_task":
-                    performance_task_weighted_score = weighted_score
-
-                elif component["name"] == "summative_test":
-                    summative_weighted_score = weighted_score
-
-            initial_grade = sum(
-                component["percentage"]
-                * component["weight"]
-                / total_applicable_weight
-                for component in applicable_components
+        for component in grading_components:
+            weight = component["weight"]
+            effective_weights[component["name"]] = weight
+            # No assessments were created for this optional category.
+            weighted_score = (
+                component["percentage"] * weight
+                if component["status"] != "NOT_APPLICABLE"
+                else 0.0
             )
 
-            rules_applied["initial_grade_calculation"] += 1
+            if component["name"] == "written_work":
+                written_work_weighted_score = weighted_score
+            elif component["name"] == "performance_task":
+                performance_task_weighted_score = weighted_score
+            elif component["name"] == "summative_test":
+                summative_weighted_score = weighted_score
+
+        initial_grade = (
+            written_work_weighted_score
+            + performance_task_weighted_score
+            + summative_weighted_score
+        )
+        rules_applied["initial_grade_calculation"] += 1
+
+    # Apply official table only when supplied; never invent conversions.
+    # The same 2-decimal Initial Grade shown in output is transmuted.
+    term_grade = transmute_initial_grade(
+        rounded(initial_grade), transmutation_table
+    )
+    if initial_grade is None:
+        term_grade_status = "INCOMPLETE"
+    elif term_grade is None:
+        term_grade_status = "AWAITING_TRANSMUTATION"
+    else:
+        term_grade_status = "COMPLETE"
+        rules_applied["term_grade_transmutation"] += 1
 
     # --------------------------------------------------------
     # Build Term Result
@@ -1298,9 +1375,8 @@ def calculate_term_result(
 
         "initial_grade": rounded(initial_grade),
 
-        # Transmutation is a separate pending stage.
-        "term_grade": None,
-        "term_grade_status": "AWAITING_TRANSMUTATION",
+        "term_grade": term_grade,
+        "term_grade_status": term_grade_status,
     }
 
 
@@ -1393,6 +1469,7 @@ def transform_data():
         # ----------------------------------------------------
 
         data = load_cleaned_data()
+        transmutation_table = load_transmutation_table()
 
         sections = data["sections"]
         subjects = data["subjects"]
@@ -1585,6 +1662,7 @@ def transform_data():
                         score_lookup=score_lookup,
                         rules_applied=rules_applied,
                         batch_id=metadata["batch_id"],
+                        transmutation_table=transmutation_table,
                     )
 
                     result_record = {
@@ -1624,18 +1702,18 @@ def transform_data():
                     for result in student_term_results
                 )
 
-                # Final grade cannot be calculated until
-                # term-grade transmutation is implemented.
-                final_grade = None
+                # Final Grade = ROUND((Term1 + Term2 + Term3) / 3).
+                # Use OFFICIAL transmuted Term Grades, not Initial Grades.
+                final_grade = calculate_final_grade([
+                    result["term_grade"] for result in student_term_results
+                ])
 
-                if all_initial_grades_available:
-
-                    final_grade_status = (
-                        "AWAITING_TRANSMUTATION"
-                    )
-
+                if final_grade is not None:
+                    final_grade_status = "COMPLETE"
+                    rules_applied["final_grade_calculation"] += 1
+                elif all_initial_grades_available:
+                    final_grade_status = "AWAITING_TRANSMUTATION"
                 else:
-
                     final_grade_status = "INCOMPLETE"
 
                 student_subject_results.append({

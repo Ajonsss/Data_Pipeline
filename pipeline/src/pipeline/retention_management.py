@@ -1,4 +1,3 @@
-
 import argparse
 import logging
 import zipfile
@@ -44,8 +43,10 @@ RETENTION_FILES = [
     # Transformation logs and records
     LOG_DIR / "transformation_logs.jsonl",
     LOG_DIR / "transformation_quarantine.jsonl",
-    TRANSFORMED_DIR / "excluded_records.json",
-    
+
+    # Transformation validation logs
+    LOG_DIR / "transformation_validation_logs.jsonl",
+
     # Temporary test file
     LOG_DIR / "retention_test.jsonl",
 ]
@@ -118,9 +119,11 @@ def archive_file(file_path):
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    archive_name = (
-        f"{file_path.stem}_{timestamp}.zip"
-    )
+    # Include the relative directory in the archive name to
+    # distinguish files with matching names in different folders.
+    relative_path = file_path.relative_to(DATA_DIR)
+    safe_name = "_".join(relative_path.parts)
+    archive_name = f"{safe_name}_{timestamp}.zip"
 
     archive_path = ARCHIVE_DIR / archive_name
 

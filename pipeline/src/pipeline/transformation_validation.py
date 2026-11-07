@@ -1,6 +1,8 @@
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import math
 from pathlib import Path
 
 from bson import json_util
@@ -19,6 +21,10 @@ TRANSFORMED_DIR = PIPELINE_DIR / "data" / "transformed"
 LOG_DIR = PIPELINE_DIR / "data" / "logs"
 
 VALIDATION_LOG = LOG_DIR / "transformation_validation_logs.jsonl"
+TRANSMUTATION_TABLE_FILE = PIPELINE_DIR / "config" / "transmutation_table.json"
+
+# A tolerance is required because transformation.py stores 2-decimal results.
+TOLERANCE = 0.035
 
 OUTPUT_FILES = {
     "student_subject_results": TRANSFORMED_DIR / "student_subject_results.json",
@@ -408,72 +414,239 @@ def validate_percentage_ranges(
     )
 
 
-def validate_initial_grades(term_results, results):
-    """
-    Check Initial Grade values when the output contains the three
-    weighted component fields in its components dictionary.
-    """
+def close_enough(actual, expected, tolerance=TOLERANCE):
+    """Compare saved (2-decimal) calculated values."""
+    return (is_number(actual) and math.isfinite(actual)
+            and math.isfinite(expected)
+            and abs(actual - expected) <= tolerance)
 
+
+def validate_initial_grades(term_results, results):
+    """Verify nested weighted scores, fixed weights and Initial Grade.
+
+    Matches transformation.py's components.{category}.weighted_score layout.
+    Missing WW/PT assessments count as zero, without weight redistribution.
+    """
     errors = []
     checked = 0
-
     for index, record in enumerate(term_results):
-
-        initial_grade = record.get("initial_grade")
         components = record.get("components")
-
-        if not isinstance(components, dict) or initial_grade is None:
+        if not isinstance(components, dict):
+            errors.append(f"Record {index}: components must be an object")
+            continue
+        ww = components.get("written_work")
+        pt = components.get("performance_task")
+        st = components.get("summative_test")
+        if any(not isinstance(x, dict) for x in (ww, pt, st)):
+            errors.append(f"Record {index}: missing grading component")
             continue
 
-        weighted_values = []
+        for label, component, weight in (
+            ("written_work", ww, 0.20),
+            ("performance_task", pt, 0.50),
+            ("summative_test", st, 0.30),
+        ):
+            if not close_enough(component.get("weight"), weight, 1e-9):
+                errors.append(f"Record {index}: {label} weight must be {weight}")
 
-        for key, value in components.items():
-            key_lower = key.lower()
-
-            if (
-                "weighted" in key_lower
-                and any(
-                    category in key_lower
-                    for category in (
-                        "written_work",
-                        "performance_task",
-                        "summative",
-                    )
-                )
-            ):
-                weighted_values.append(value)
-
-        if len(weighted_values) != 3:
+        initial = record.get("initial_grade")
+        status = record.get("status")
+        if status == "INCOMPLETE":
+            if initial is not None:
+                errors.append(f"Record {index}: INCOMPLETE term has Initial Grade")
+            continue
+        if status != "COMPLETE":
+            errors.append(f"Record {index}: invalid term status {status}")
+            continue
+        if not is_number(initial):
+            errors.append(f"Record {index}: COMPLETE term missing Initial Grade")
             continue
 
-        if not all(is_number(value) for value in weighted_values):
-            errors.append(
-                f"Record {index}: weighted components must be numeric."
-            )
+        parts = []
+        for label, component, weight in (
+            ("written_work", ww, .20), ("performance_task", pt, .50),
+            ("summative_test", st, .30),
+        ):
+            pct = component.get("percentage") if label != "summative_test" else component.get("component_percentage")
+            state = component.get("status")
+            weighted = component.get("weighted_score")
+            if state == "NOT_APPLICABLE" and label in ("written_work", "performance_task"):
+                if component.get("assessment_count") != 0 or pct is not None or not close_enough(weighted, 0):
+                    errors.append(f"Record {index}: {label} absent category must contribute zero")
+                parts.append(0.0)
+            elif state == "COMPLETE" and is_number(pct):
+                if not close_enough(weighted, pct * weight):
+                    errors.append(f"Record {index}: {label} weighted_score does not match percentage x {weight}")
+                parts.append(pct * weight)
+            else:
+                errors.append(f"Record {index}: {label} not complete for a COMPLETE term")
+        if len(parts) == 3:
+            checked += 1
+            if not close_enough(initial, sum(parts)):
+                errors.append(f"Record {index}: Initial Grade {initial} != expected {sum(parts):.2f}")
+            weights = record.get("effective_weights", {})
+            for label, weight in (("written_work", .20), ("performance_task", .50), ("summative_test", .30)):
+                if not isinstance(weights, dict) or not close_enough(weights.get(label), weight, 1e-9):
+                    errors.append(f"Record {index}: {label} effective weight was redistributed")
+
+    add_result(results, "Initial Grade Check", "term_grade_results.json",
+               "Verify nested weighted scores, fixed 20/50/30 weights, and Initial Grade.",
+               "CRITICAL", not errors,
+               f"Verified {checked} complete term grades; {len(errors)} errors. " + "; ".join(errors[:15]))
+
+
+def validate_assessment_calculations(term_results, results):
+    """Recalculate category percentages and ST1/ST2/exam split."""
+    errors = []
+    checked = 0
+    for index, record in enumerate(term_results):
+        components = record.get("components", {})
+        if not isinstance(components, dict):
+            continue  # caught by Initial Grade Check
+        for label in ("written_work", "performance_task"):
+            component = components.get(label)
+            if not isinstance(component, dict) or component.get("status") != "COMPLETE":
+                continue
+            score, hps = component.get("total_score"), component.get("total_hps")
+            if not is_number(score) or not is_number(hps) or hps <= 0:
+                errors.append(f"Record {index}: {label} invalid score/HPS")
+            else:
+                checked += 1
+                if not close_enough(component.get("percentage"), score / hps * 100):
+                    errors.append(f"Record {index}: {label} percentage mismatch")
+        summative = components.get("summative_test")
+        if not isinstance(summative, dict) or summative.get("status") != "COMPLETE":
             continue
+        pcts = []
+        for key in ("st1", "st2", "term_exam"):
+            part = summative.get(key)
+            if not isinstance(part, dict) or part.get("status") != "COMPLETE":
+                errors.append(f"Record {index}: {key} missing despite COMPLETE summative")
+                continue
+            score, hps = part.get("score"), part.get("hps")
+            if not is_number(score) or not is_number(hps) or hps <= 0:
+                errors.append(f"Record {index}: {key} invalid score/HPS")
+                continue
+            if not close_enough(part.get("percentage"), score / hps * 100):
+                errors.append(f"Record {index}: {key} percentage mismatch")
+            pcts.append(score / hps * 100)
+        if len(pcts) == 3:
+            checked += 1
+            expected = .30 * pcts[0] + .30 * pcts[1] + .40 * pcts[2]
+            # Each of three assessment percentages is rounded before the transformation sums them.
+            if not close_enough(summative.get("component_percentage"), expected):
+                errors.append(f"Record {index}: summative 30/30/40 calculation mismatch")
+    add_result(results, "Assessment Calculation Check", "term_grade_results.json.components",
+               "Verify score/HPS percentages and summative ST1/ST2/exam 30/30/40 split.",
+               "CRITICAL", not errors,
+               f"Verified {checked} calculated components; {len(errors)} errors. " + "; ".join(errors[:15]))
 
-        checked += 1
-        expected_grade = sum(weighted_values)
 
-        if abs(float(initial_grade) - expected_grade) > 0.01:
-            errors.append(
-                f"Record {index}: Initial Grade does not equal "
-                f"the sum of weighted components."
-            )
+def load_official_ranges():
+    """Read the same optional transmutation file used by transformation.py."""
+    if not TRANSMUTATION_TABLE_FILE.is_file():
+        return None
+    with TRANSMUTATION_TABLE_FILE.open(encoding="utf-8") as handle:
+        config = json.load(handle)
+    if not isinstance(config, dict) or not isinstance(config.get("ranges"), list):
+        raise ValueError("Transmutation config must contain a ranges list")
+    ranges = []
+    for item in config["ranges"]:
+        try:
+            low, high, grade = (Decimal(str(item[key])) for key in ("min", "max", "grade"))
+        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
+            raise ValueError("Invalid transmutation range entry") from error
+        if not all(x.is_finite() for x in (low, high, grade)) or low < 0 or high > 100 or low > high or grade != grade.to_integral_value() or not 0 <= grade <= 100:
+            raise ValueError("Invalid transmutation range bounds or grade")
+        ranges.append((low, high, int(grade)))
+    ranges.sort(key=lambda item: item[0])
+    if any(b[0] <= a[1] for a, b in zip(ranges, ranges[1:])):
+        raise ValueError("Overlapping transmutation ranges")
+    return ranges or None
 
-    add_result(
-        results,
-        "Initial Grade Check",
-        "term_grade_results.json.initial_grade",
-        "Verify that Initial Grade equals the sum of its weighted components.",
-        "CRITICAL",
-        len(errors) == 0,
-        (
-            f"Initial Grade calculation passed for {checked} records."
-            if not errors
-            else "; ".join(errors[:20])
-        )
-    )
+
+def official_grade(initial, ranges):
+    if initial is None or ranges is None:
+        return None
+    for low, high, grade in ranges:
+        if low <= Decimal(str(initial)) <= high:
+            return grade
+    return None
+
+
+def validate_term_grades(term_results, results):
+    """Confirm Term Grade mapping; pending transmutation is a warning."""
+    errors, pending = [], 0
+    try:
+        ranges = load_official_ranges()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        ranges = None
+        errors.append(f"Invalid official transmutation config: {error}")
+    for i, record in enumerate(term_results):
+        initial = record.get("initial_grade")
+        grade = record.get("term_grade")
+        status = record.get("term_grade_status")
+        expected = official_grade(initial, ranges) if ranges is not None and is_number(initial) else None
+        if initial is None:
+            if grade is not None or status != "INCOMPLETE":
+                errors.append(f"Record {i}: incomplete initial grade has invalid term grade/status")
+        elif expected is None:
+            if grade is not None or status != "AWAITING_TRANSMUTATION":
+                errors.append(f"Record {i}: transmutation is unavailable but grade/status is not pending")
+            else:
+                pending += 1
+        elif grade != expected or status != "COMPLETE" or not isinstance(grade, int) or isinstance(grade, bool):
+            errors.append(f"Record {i}: Term Grade {grade} does not match official mapping {expected}")
+    add_result(results, "Term Grade Transmutation Check", "term_grade_results.json.term_grade",
+               "Validate term grades using the configured official transmutation table.",
+               "CRITICAL", not errors, "; ".join(errors[:15]) if errors else "All available official term grade mappings are correct.")
+    add_result(results, "Pending Transmutation Warning", "term_grade_results.json.term_grade_status",
+               "Warn when official grades cannot be calculated because ranges or mappings are missing.",
+               "NON-CRITICAL", pending == 0,
+               f"{pending} term results awaiting transmutation (official table/range unavailable).")
+
+
+def validate_final_grades(student_results, term_results, results):
+    """Verify three-term rounding and consistency between both outputs."""
+    errors, pending = [], 0
+    term_lookup = {}
+    for item in term_results:
+        key = (item.get("student_id"), item.get("subject_id"), item.get("term"))
+        term_lookup[key] = item
+    for i, row in enumerate(student_results):
+        sid, subid = row.get("student_id"), row.get("subject_id")
+        embedded = row.get("terms")
+        if not isinstance(embedded, list) or len(embedded) != 3 or {x.get("term") for x in embedded if isinstance(x, dict)} != {1, 2, 3}:
+            errors.append(f"Record {i}: expected exactly three distinct term records")
+            continue
+        for term in embedded:
+            source = term_lookup.get((sid, subid, term["term"]))
+            if source is None or source != term:
+                errors.append(f"Record {i}: embedded term {term['term']} differs from term_grade_results")
+        grades = [term.get("term_grade") for term in embedded]
+        expected = None
+        if all(isinstance(x, int) and not isinstance(x, bool) for x in grades):
+            expected = int((sum(Decimal(x) for x in grades) / Decimal(3)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        actual = row.get("final_grade")
+        status = row.get("final_grade_status")
+        if expected is not None:
+            if actual != expected or status != "COMPLETE" or not isinstance(actual, int) or isinstance(actual, bool):
+                errors.append(f"Record {i}: final grade/status incorrect; expected {expected}")
+        elif actual is not None:
+            errors.append(f"Record {i}: final grade present before all terms are transmuted")
+        else:
+            expected_status = ("AWAITING_TRANSMUTATION" if all(term.get("initial_grade") is not None for term in embedded) else "INCOMPLETE")
+            if status != expected_status:
+                errors.append(f"Record {i}: final status {status} != {expected_status}")
+            pending += 1
+    add_result(results, "Final Grade Check", "student_subject_results.json.final_grade",
+               "Verify average of three official Term Grades, rounded half up.",
+               "CRITICAL", not errors,
+               f"Checked {len(student_results)} student-subject results. " + "; ".join(errors[:15]))
+    add_result(results, "Pending Final Grade Warning", "student_subject_results.json.final_grade_status",
+               "Report student-subject results awaiting transmutation or incomplete terms.",
+               "NON-CRITICAL", pending == 0,
+               f"{pending} student-subject results have no final grade yet.")
 
 
 def validate_excluded_records(excluded_records, results):
@@ -566,6 +739,9 @@ def validate_transformed_data():
         )
 
         validate_initial_grades(term_results, results)
+        validate_assessment_calculations(term_results, results)
+        validate_term_grades(term_results, results)
+        validate_final_grades(student_subject_results, term_results, results)
 
     if "excluded_records" in output_data:
         validate_excluded_records(excluded_records, results)

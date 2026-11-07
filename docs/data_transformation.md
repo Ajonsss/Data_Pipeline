@@ -134,6 +134,47 @@ The report contains the following columns:
 
 The profiling report provides the information needed to determine which cleaning rules should be applied during the subsequent Data Cleaning Stage. The original extracted JSON files remain unchanged during profiling.
 
+## 3. Data Cleaning Rules
+
+The data cleaning stage corrects formatting issues and rejects records that fail the defined data-quality checks. The pipeline processes the extracted EduLite JSON files and saves the cleaned records separately in `data/cleaned/`. The original raw files are preserved.
+
+Each rejected record is counted and recorded in `data/logs/rejected_records.jsonl`. A summary of input, cleaned, and rejected records is saved in `data/logs/cleaning_logs.jsonl`.
+
+### 3.1 Cleaning Rules
+
+| Rule ID | Target | Condition | Action | Justification |
+|---|---|---|---|---|
+| C-01 | Required fields in all five files | Required field is missing, null, or blank | Reject and log the record | Prevents incomplete records from entering later processing. |
+| C-02 | All files: `_id` | Duplicate identifier is detected | Keep the first occurrence and reject and log subsequent occurrences | Prevents duplicate identifiers from being included in the cleaned output. |
+| C-03 | `students.grade`, `assessments.totalItems`, `assessmentScores.score` | Value is not an integer | Reject and log the record | Ensures numeric fields use the expected data type. |
+| C-04 | `students.grade` | Grade is zero or negative | Reject and log the record | Prevents invalid grade-level values. |
+| C-04 | `assessments.totalItems` | Total items is zero or negative | Reject and log the record | Ensures assessments have a valid positive number of items. |
+| C-04 | `assessmentScores.score` | Score is negative or exceeds the assessment's total items | Reject and log the record | Prevents scores outside the defined assessment range. |
+| C-05 | `students.sectionId` | Referenced section does not exist in the cleaned sections data | Reject and log the record | Prevents student records from referencing nonexistent sections. |
+| C-05 | `assessments.subjectId` | Referenced subject does not exist in the cleaned subjects data | Reject and log the record | Ensures assessments are associated with existing subjects. |
+| C-05 | `assessmentScores.studentId`, `assessmentScores.assessmentId` | Referenced student or assessment does not exist in the cleaned data | Reject and log the record | Prevents assessment scores from becoming orphan records. |
+| S-01 | `name` fields in all five files where present | Name contains leading or trailing whitespace | Trim the whitespace | Improves consistency when comparing or matching names. |
+
+### 3.2 Duplicate Handling
+
+When duplicate `_id` values are found in the same file, the pipeline retains the first occurrence and rejects subsequent occurrences. Every rejected duplicate is logged. The pipeline does not assume that a record is more accurate simply because it appears later in the file.
+
+### 3.3 Missing and Invalid Values
+
+Records with missing required fields are rejected rather than silently filled with default values. Invalid numeric types and values are also rejected and logged. The pipeline does not invent missing student, subject, section, assessment, or score information.
+
+### 3.4 Orphan Records
+
+The pipeline checks the relationships between students and sections, assessments and subjects, and assessment scores and their related students and assessments. Records with unresolved references are rejected and logged so they can be reviewed against the source data.
+
+### 3.5 Logging and Output
+
+The cleaned files are written to `data/cleaned/`, while rejected-record details are written to `data/logs/rejected_records.jsonl`. The cleaning summary records the number of input records, cleaned records, and rejected records for each file.
+
+This process ensures that rejected records are not silently dropped and that the raw extracted data remains available for investigation or reprocessing.
+
+
+
 
 
 

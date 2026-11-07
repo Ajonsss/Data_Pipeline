@@ -263,6 +263,64 @@ After cleaning and validation, the pipeline generates cleaned JSON files for the
 These outputs provide a record of the cleaning process and help identify how many records were retained or rejected during each run.
 
 
+## 5. Business Transformation Rules
+
+The Business Transformation Rules define how cleaned student, subject, assessment, and assessment-score data are converted into business-ready student performance records. These rules include joining related records, grouping assessments by category, calculating percentages and weighted scores, and checking assessment completeness based on the EduLITE grading rules.
+
+### 5.1 Business Transformation Rules
+
+| Rule ID | Input Columns | Logic / Formula | Output Column | Business Reason |
+|---|---|---|---|---|
+| B-01 | `students._id`, `students.sectionId`, `students.grade`, `sections._id` | Match each student's `sectionId` with the corresponding section record. | Student-section relationship | Identifies the section and grade level associated with each student. |
+| B-02 | `students._id`, `subjects._id`, `assessments.subjectId` | Match assessments to their corresponding subjects and organize results by student and subject. | Student-subject assessment records | Ensures assessment results are associated with the correct student and subject. |
+| B-03 | `assessments.classSections`, `students.grade`, `students.sectionId` | If `classSections` is empty or null, treat the assessment as subject-wide. Otherwise, include it only when the student's grade and section match an assigned class section. | Applicable assessments | Ensures students are evaluated only using assessments intended for their class or section. |
+| B-04 | `assessmentScores.studentId`, `assessmentScores.assessmentId`, `assessmentScores.score` | Match scores using the combination of `studentId` and `assessmentId`. A missing score record is currently treated as zero. | Student assessment score lookup | Connects each student's score to the correct assessment. |
+| B-05 | `assessments.category`, `assessmentScores.score`, `assessments.totalItems` | Group all applicable assessments with the category `written_work`. Add their scores and HPS, then calculate `(Total WW Score / Total WW HPS) * 100`. | Written Work Percentage | Calculates the student's overall Written Work performance, supporting multiple assessments. |
+| B-06 | `assessments.category`, `assessmentScores.score`, `assessments.totalItems` | Group all applicable assessments with the category `performance_task`. Add their scores and HPS, then calculate `(Total PT Score / Total PT HPS) * 100`. | Performance Task Percentage | Calculates the student's overall Performance Task performance, supporting multiple assessments. |
+| B-07 | `assessments.category`, `assessments.sequence`, `assessmentScores.score`, `assessments.totalItems` | Identify the Summative Test assessments using sequence numbers 1 and 2. Calculate each percentage separately: `(Assessment Score / HPS) * 100`. | ST1 Percentage, ST2 Percentage | Calculates the two Summative Test results separately according to their sequence numbers. |
+| B-08 | `assessments.category`, `assessments.sequence`, `assessmentScores.score`, `assessments.totalItems` | Identify the Term Examination using sequence number 1. Calculate `(Term Exam Score / HPS) * 100`. | Term Examination Percentage | Calculates the student's Term Examination performance. |
+| B-09 | Written Work Percentage, Performance Task Percentage, ST1 Percentage, ST2 Percentage, Term Examination Percentage | Multiply Written Work by 20%, Performance Task by 50%, and the Summative component by 30%. The Summative component is calculated as `(ST1 * 0.30) + (ST2 * 0.30) + (Term Exam * 0.40)`. | Weighted Assessment Scores | Applies the prescribed EduLITE grading weights to each assessment category. |
+| B-10 | Weighted Written Work, Weighted Performance Task, Weighted Summative Component | Add the three weighted scores: `WW Weighted + PT Weighted + Summative Weighted`. | Initial Grade | Produces the student's initial grade for a specific subject and academic term. |
+| B-11 | `assessments.term`, `assessments.subjectId`, `students._id` | Organize the assessment results by student, subject, and academic term (1, 2, and 3). | Student-Subject-Term Records | Keeps student performance results organized according to the academic grading period. |
+| B-12 | Required assessment records and calculated components | Check whether the required assessment components are available. The code expects one ST1, one ST2, and one Term Examination. It marks results incomplete when required components are missing or when multiple assessments match a required sequence. | Term Grade Status | Identifies results that are not yet ready for complete grade computation. |
+
+### 5.2 Filtering and Conditional Logic
+
+The transformation process also applies conditions to determine which records are included in the computation.
+
+| Rule ID | Input Columns | Logic | Output | Business Reason |
+|---|---|---|---|---|
+| B-13 | `assessments.term` | Process assessment records according to their academic term. | Term-specific results | Prevents assessments from different terms from being combined. |
+| B-14 | `assessments.category` | Use the `category` field to identify Written Work, Performance Task, Summative Test, and Term Examination. The legacy `type` field is not used for category identification. | Categorized assessment records | Ensures assessments follow the current EduLITE assessment classification. |
+| B-15 | `assessments.sequence` | For Summative Tests, identify sequence 1 as ST1 and sequence 2 as ST2. For Term Examination, identify sequence 1. | Sequence-specific assessment records | Ensures the correct assessment is used in each grading component. |
+
+### 5.3 Output of Business Transformation
+
+The Transformation Stage generates the following files:
+
+| Output File | Description |
+|---|---|
+| `student_subject_results.json` | Contains student performance results organized by subject, including assessment percentages and weighted scores. |
+| `term_grade_results.json` | Contains the student's term-level results, including the Initial Grade and computation status. |
+| `excluded_records.json` | Contains records identified as excluded or not fully processable during transformation. |
+
+The generated files are saved in the `data/transformed/` directory.
+
+### 5.4 Dimensional Modeling
+
+Dimensional modeling is not currently implemented in this stage. The transformation process does not create separate fact or dimension tables, generate surrogate keys, or apply Slowly Changing Dimension techniques. Instead, it organizes the transformed academic data into JSON files for the subsequent loading stage.
+
+### 5.5 Implementation Notes
+
+The following implementation details should be considered when finalizing the transformation code:
+
+1. **Missing Written Work or Performance Task assessments:** The grading manual states that a category with no created assessments should be excluded from the computation. However, the current code marks the result incomplete when either category has no assessments. The code should be updated to follow the grading rule.
+2. **Transmutation:** The current code calculates the Initial Grade but does not yet apply the transmutation table to produce the Term Grade.
+3. **Final Grade:** The Final Grade cannot yet be calculated because the transmuted Term Grades are not available.
+4. **Business exclusions:** The current code applies assessment applicability rules, but it does not implement a separate business-status exclusion rule, such as excluding cancelled assessments. Such a rule should only be documented if it is implemented.
+
+
+
 
 
 

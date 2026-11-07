@@ -173,6 +173,96 @@ The cleaned files are written to `data/cleaned/`, while rejected-record details 
 
 This process ensures that rejected records are not silently dropped and that the raw extracted data remains available for investigation or reprocessing.
 
+## 4. Standardization and Data Type Rules
+
+### 4.1 Purpose
+
+Standardization and data type rules ensure that extracted EduLite academic data follows consistent formats and valid data types before being used in further transformation and analysis. The cleaning process applies these rules to five collections: sections, subjects, students, assessments, and assessment scores.
+
+The rules help identify missing values, duplicate identifiers, invalid numeric values, and references to records that do not exist. Records that fail validation are excluded from the cleaned output and recorded in the rejection log.
+
+### 4.2 Data Types
+
+The following table defines the expected data types and validation rules for the important fields in the EduLite ETL pipeline.
+
+| Column | Collection | Expected Data Type | Validation Rule |
+|---|---|---|---|
+| `_id` | All collections | MongoDB identifier | Must be present and non-missing. Duplicate IDs are rejected, and the first occurrence is retained. |
+| `name` | Sections, Subjects, Students, Assessments | String | Leading and trailing whitespace is removed. The value must not be missing or empty after trimming. |
+| `grade` | Students | Integer | Must be an integer greater than zero. |
+| `sectionId` | Students | MongoDB identifier | Must reference an existing section in the cleaned data. |
+| `subjectId` | Assessments | MongoDB identifier | Must reference an existing subject in the cleaned data. |
+| `totalItems` | Assessments | Integer | Must be an integer greater than zero. |
+| `studentId` | Assessment Scores | MongoDB identifier | Must reference an existing student in the cleaned data. |
+| `assessmentId` | Assessment Scores | MongoDB identifier | Must reference an existing assessment in the cleaned data. |
+| `score` | Assessment Scores | Integer | Must be an integer greater than or equal to zero and must not exceed the assessment's `totalItems`. |
+
+The cleaning script validates numeric fields but does not automatically convert numeric strings or decimal values into integers. A value must already be a valid integer to pass the implemented numeric validation.
+
+### 4.3 Standard Formats
+
+#### Text Standardization
+
+The cleaning process applies Rule S-01 to the `name` field in all four applicable collections. It removes unnecessary whitespace from the beginning and end of a name while preserving its original capitalization and spelling.
+
+For example, `"  Mathematics  "` becomes `"Mathematics"`. The script does not convert names to uppercase or title case.
+
+#### Numeric Standardization
+
+The `grade`, `totalItems`, and `score` fields are checked to ensure that they contain valid integer values.
+
+- `grade` must be greater than zero.
+- `totalItems` must be greater than zero.
+- `score` must not be negative.
+- `score` must not exceed the corresponding assessment's `totalItems`.
+
+The pipeline does not apply rounding because these fields are validated as integers. If decimal scores or calculated averages are introduced later, their precision and rounding rules should be documented separately.
+
+#### Identifier Standardization
+
+MongoDB identifiers and their related reference fields are preserved using MongoDB-compatible JSON serialization. The cleaning process compares their string representations to determine whether related records exist.
+
+The identifiers are not converted to UUIDs or another identifier format by the current cleaning script.
+
+### 4.4 Reference Values and Codes
+
+The current pipeline does not contain currency, measurement units, country codes, or gender fields. Therefore, standardization mappings for these values are not applicable to the current extraction scope.
+
+Instead, the cleaning process validates relationships between collections using Rule C-05.
+
+| Collection | Reference Field | Referenced Collection | Validation |
+|---|---|---|---|
+| Students | `sectionId` | Sections | The referenced section must exist in the cleaned sections data. |
+| Assessments | `subjectId` | Subjects | The referenced subject must exist in the cleaned subjects data. |
+| Assessment Scores | `studentId` | Students | The referenced student must exist in the cleaned students data. |
+| Assessment Scores | `assessmentId` | Assessments | The referenced assessment must exist in the cleaned assessments data. |
+
+Records with missing or unmatched references are rejected from the cleaned output and recorded in `data/logs/rejected_records.jsonl`.
+
+### 4.5 Handling Conversion and Validation Failures
+
+The cleaning process uses validation rather than automatic data type conversion. If a value does not satisfy the required format or validation rule, the affected record is excluded from the cleaned output.
+
+The following rules are applied:
+
+| Rule ID | Validation Rule | Action |
+|---|---|---|
+| C-01 | Required values are missing or empty. | Reject the record and log the reason. |
+| C-02 | A duplicate `_id` is found. | Reject the duplicate record while retaining the first occurrence. |
+| C-03 | A numeric field does not contain a valid integer. | Reject the record and log the invalid field. |
+| C-04 | A numeric value violates its permitted range. | Reject the record and log the reason. |
+| C-05 | A reference does not match an existing parent record. | Reject the record and log the unmatched reference. |
+| S-01 | A name contains leading or trailing whitespace. | Trim the whitespace before validating and saving the record. |
+
+Rejected records are recorded in `data/logs/rejected_records.jsonl`. The log includes the collection name, record index, record identifier, rejection reasons, timestamp, and rejection action. The cleaning process saves accepted records as separate JSON files in `data/cleaned/`, leaving the raw extraction files separate.
+
+### 4.6 Output and Logging
+
+After cleaning and validation, the pipeline generates cleaned JSON files for the five collections in the `data/cleaned/` directory. It also records the cleaning run ID, start and end timestamps, execution status, input counts, cleaned counts, and rejected counts in `data/logs/cleaning_logs.jsonl`.
+
+These outputs provide a record of the cleaning process and help identify how many records were retained or rejected during each run.
+
+
 
 
 

@@ -13,7 +13,6 @@ PIPELINE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = PIPELINE_DIR / "data"
 LOG_DIR = DATA_DIR / "logs"
 PROFILING_DIR = DATA_DIR / "profiling"
-TRANSFORMED_DIR = DATA_DIR / "transformed"
 ARCHIVE_DIR = DATA_DIR / "archive"
 
 # ============================================================
@@ -22,11 +21,13 @@ ARCHIVE_DIR = DATA_DIR / "archive"
 
 RETENTION_DAYS = 90
 
-# Creating this file pauses retention deletion.
+# Creating this file pauses all retention archiving and deletion.
 RETENTION_HOLD_FILE = DATA_DIR / "retention_hold.txt"
 
-# Retention-managed files.
-# Active raw, cleaned, and transformed datasets are not included.
+# Retention-managed operational logs and supporting reports.
+# Active raw, cleaned, and transformed datasets are NOT included.
+# Pending-review manifests and acceptance quarantine batches are
+# also excluded; they require a separate review/retention policy.
 RETENTION_FILES = [
     # Extraction logs
     LOG_DIR / "extraction_logs.jsonl",
@@ -40,14 +41,17 @@ RETENTION_FILES = [
     LOG_DIR / "profiling_logs.jsonl",
     PROFILING_DIR / "data_quality_issues.csv",
 
-    # Transformation logs and records
+    # Transformation logs and quarantine records
     LOG_DIR / "transformation_logs.jsonl",
     LOG_DIR / "transformation_quarantine.jsonl",
 
-    # Transformation validation logs
+    # Independent transformation validation logs
     LOG_DIR / "transformation_validation_logs.jsonl",
 
-    # Temporary test file
+    # Transformation acceptance and handover decision logs
+    LOG_DIR / "transformation_acceptance_logs.jsonl",
+
+    # Temporary file used to test retention behavior
     LOG_DIR / "retention_test.jsonl",
 ]
 
@@ -69,12 +73,11 @@ logger = logging.getLogger(__name__)
 
 def is_retention_on_hold():
     """
-    Checks whether retention deletion is currently paused.
+    Check whether retention archiving and deletion are paused.
 
-    If retention_hold.txt exists, the retention process will
-    not archive or delete eligible files.
+    If data/retention_hold.txt exists, no files are archived
+    or deleted by this script.
     """
-
     return RETENTION_HOLD_FILE.exists()
 
 
@@ -84,10 +87,11 @@ def is_retention_on_hold():
 
 def is_file_expired(file_path, retention_days=RETENTION_DAYS):
     """
-    Checks whether a file has exceeded the configured
-    retention period based on its last-modified timestamp.
-    """
+    Check whether a file is older than the retention period.
 
+    Age is based on the file's last-modified timestamp, not
+    individual timestamps inside JSONL or CSV records.
+    """
     if not file_path.exists() or not file_path.is_file():
         return False
 
@@ -109,39 +113,36 @@ def is_file_expired(file_path, retention_days=RETENTION_DAYS):
 
 def archive_file(file_path):
     """
-    Archives an expired file into a ZIP file.
+    Create and verify a ZIP archive of an expired file.
 
-    The archive is verified before the original file
-    is deleted. The original remains if archiving fails.
+    The original file is not deleted here. If archive
+    creation or verification fails, the original remains.
     """
-
     ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    # Include the relative directory in the archive name to
-    # distinguish files with matching names in different folders.
+    # Include the source directory to distinguish files that
+    # have the same filename but are in different directories.
     relative_path = file_path.relative_to(DATA_DIR)
     safe_name = "_".join(relative_path.parts)
     archive_name = f"{safe_name}_{timestamp}.zip"
-
     archive_path = ARCHIVE_DIR / archive_name
 
     try:
-        # Create the ZIP archive.
+        # Mode "x" prevents accidentally overwriting an existing
+        # archive with the same filename and timestamp.
         with zipfile.ZipFile(
             archive_path,
-            mode="w",
+            mode="x",
             compression=zipfile.ZIP_DEFLATED,
         ) as archive:
-
-            # Preserve the file's name inside the archive.
             archive.write(
                 file_path,
                 arcname=file_path.name,
             )
 
-        # Verify that the archive is valid.
+        # Verify the ZIP is readable and contains the source file.
         with zipfile.ZipFile(archive_path, mode="r") as archive:
             corrupted_file = archive.testzip()
 
@@ -155,23 +156,20 @@ def archive_file(file_path):
                     "Original file was not found inside the archive."
                 )
 
-        logger.info(
-            "Archive created and verified: %s",
-            archive_path,
-        )
-
+        logger.info("Archive created and verified: %s", archive_path)
         return archive_path
 
+    except FileExistsError:
+        # Do not delete or overwrite an archive created by another run.
+        logger.error("Archive already exists; source retained: %s", archive_path)
+        return None
+
     except Exception:
-        # Remove an incomplete archive, if one was created.
+        # Remove only the incomplete archive created by this attempt.
         if archive_path.exists():
             archive_path.unlink()
 
-        logger.exception(
-            "Failed to archive file: %s",
-            file_path,
-        )
-
+        logger.exception("Failed to archive file: %s", file_path)
         return None
 
 
@@ -181,10 +179,9 @@ def archive_file(file_path):
 
 def delete_original_file(file_path, archive_path):
     """
-    Deletes the original file only after its archive
-    has been successfully created and verified.
+    Delete the original only after its ZIP archive
+    has been created and verified successfully.
     """
-
     if archive_path is None or not archive_path.exists():
         logger.error(
             "Original file was not deleted because no valid archive exists: %s",
@@ -194,20 +191,14 @@ def delete_original_file(file_path, archive_path):
 
     try:
         file_path.unlink()
-
         logger.info(
             "Original file deleted after successful archiving: %s",
             file_path,
         )
-
         return True
 
     except Exception:
-        logger.exception(
-            "Failed to delete original file: %s",
-            file_path,
-        )
-
+        logger.exception("Failed to delete original file: %s", file_path)
         return False
 
 
@@ -217,24 +208,17 @@ def delete_original_file(file_path, archive_path):
 
 def manage_retention(dry_run=True):
     """
-    Manages the retention of ETL logs and supporting records.
+    Manage retention of ETL operational logs and supporting records.
 
-    Files older than the retention period are archived first.
-    Original files are deleted only after successful archive
-    verification.
+    Files older than 90 days are archived and verified before
+    their originals are deleted.
 
-    Dry-run mode is enabled by default. Use --apply to perform
-    actual archiving and deletion.
+    By default, dry-run only reports eligible files.
+    Use --apply to perform real archiving and deletion.
     """
-
     logger.info("Starting retention management.")
+    logger.info("Retention period: %s days", RETENTION_DAYS)
 
-    logger.info(
-        "Retention period: %s days",
-        RETENTION_DAYS,
-    )
-
-    # Check whether a retention hold is active.
     if is_retention_on_hold():
         logger.warning(
             "Retention hold is active. No files will be archived or deleted."
@@ -242,13 +226,9 @@ def manage_retention(dry_run=True):
         return
 
     if dry_run:
-        logger.info(
-            "DRY-RUN MODE: No files will be archived or deleted."
-        )
+        logger.info("DRY-RUN MODE: No files will be archived or deleted.")
     else:
-        logger.info(
-            "APPLY MODE: Eligible files will be archived and deleted."
-        )
+        logger.info("APPLY MODE: Eligible files will be archived and deleted.")
 
     files_checked = 0
     expired_files = 0
@@ -257,33 +237,26 @@ def manage_retention(dry_run=True):
     failed_files = 0
 
     for file_path in RETENTION_FILES:
-
-        # Skip files that do not exist.
         if not file_path.exists() or not file_path.is_file():
             continue
 
         files_checked += 1
 
-        # Check whether the file has exceeded its retention period.
         if not is_file_expired(file_path):
-            logger.info(
-                "File is still within retention period: %s",
-                file_path,
-            )
+            logger.info("File is still within retention period: %s", file_path)
             continue
 
         expired_files += 1
+        logger.info("Expired file found: %s", file_path)
 
-        logger.info(
-            "Expired file found: %s",
-            file_path,
-        )
-
-        # Dry-run mode only reports eligible files.
         if dry_run:
             continue
 
-        # Archive the expired file.
+        # A hold can be placed while the script is processing files.
+        if is_retention_on_hold():
+            logger.warning("Retention hold activated; stopping processing.")
+            break
+
         archive_path = archive_file(file_path)
 
         if archive_path is None:
@@ -292,40 +265,19 @@ def manage_retention(dry_run=True):
 
         archived_files += 1
 
-        # Delete the original only after successful archiving.
         if delete_original_file(file_path, archive_path):
             deleted_files += 1
         else:
             failed_files += 1
 
-    # Display retention summary.
     logger.info("Retention management completed.")
-
-    logger.info(
-        "Files checked: %s",
-        files_checked,
-    )
-
-    logger.info(
-        "Expired files found: %s",
-        expired_files,
-    )
+    logger.info("Files checked: %s", files_checked)
+    logger.info("Expired files found: %s", expired_files)
 
     if not dry_run:
-        logger.info(
-            "Files archived: %s",
-            archived_files,
-        )
-
-        logger.info(
-            "Original files deleted: %s",
-            deleted_files,
-        )
-
-        logger.info(
-            "Failed operations: %s",
-            failed_files,
-        )
+        logger.info("Files archived: %s", archived_files)
+        logger.info("Original files deleted: %s", deleted_files)
+        logger.info("Failed operations: %s", failed_files)
 
 
 # ============================================================
@@ -333,7 +285,6 @@ def manage_retention(dry_run=True):
 # ============================================================
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(
         description="EduLITE ETL Retention Management"
     )
@@ -345,7 +296,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    # Default behavior is dry-run.
-    # Actual changes require the --apply argument.
     manage_retention(dry_run=not args.apply)

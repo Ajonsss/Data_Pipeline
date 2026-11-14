@@ -1117,5 +1117,66 @@ These records provide traceability for approved, reviewed, and rejected transfor
 - **Load Stage:** Accepts only batches with an APPROVED handover manifest and verifies the required output files before loading.
 
 
+## 11. Common Transformation Problems and Mitigation
+
+### 11.1 Purpose
+
+This section identifies common problems that may occur during the Transformation Stage of the EduLITE Assessment Analytics ETL Pipeline. It describes their possible causes, effects on academic performance calculations, and proposed solutions or mitigation measures.
+
+The purpose is to ensure that student academic records are transformed accurately and consistently before they proceed to the Transformation Validation and Acceptance Stages.
+
+### 11.2 Common Transformation Problems
+
+The following table presents potential transformation problems relevant to the EduLITE student, subject, assessment, and assessment score data.
+
+| Problem | Possible Cause | Impact on the Transformation Process | Proposed Solution or Mitigation |
+|---|---|---|---|
+| Duplicate assessment scores | Multiple score records exist for the same student and assessment. | Duplicate records may cause inaccurate score calculations or prevent the affected term result from being completed. | Detect duplicate student-assessment combinations and quarantine affected records for review. |
+| Missing required summative assessments | Required Summative Test 1, Summative Test 2, or Term Exam records are unavailable. | The summative component cannot be fully calculated, resulting in an incomplete term grade. | Check for all required summative assessments and mark affected term results as incomplete until the missing assessments are available. |
+| Invalid assessment scores | A score is negative, non-numeric, or greater than the assessment's Highest Possible Score (HPS). | Invalid scores may produce incorrect percentages and Initial Grades. | Validate score values against the assessment HPS and quarantine records that fail validation. |
+| Missing student or subject references | Academic records reference student or subject IDs that do not exist in the cleaned datasets. | The transformation process cannot correctly associate academic records with their corresponding students or subjects. | Validate student and subject references before calculation and reject records with invalid references. |
+| Unsupported assessment categories | An assessment contains a missing or unsupported category value instead of an accepted category. | The assessment may be excluded from the grading calculation, resulting in incomplete or inaccurate academic results. | Validate categories against the supported values: `written_work`, `performance_task`, `summative_test`, and `term_exam`. Quarantine unsupported records. |
+| Duplicate assessment sequences | Multiple assessments have the same subject, term, category, and sequence number. | The transformation process may not be able to identify the correct assessment for summative calculations. | Check assessment sequence uniqueness and quarantine duplicate assessment definitions for review. |
+| Missing student-subject assignments | A student has an empty or missing `subjectIds` array. | The student's academic results may not be generated because no assigned subjects are available for processing. | Identify students without assigned subjects and record them in transformation exclusions or warning logs for review. |
+| Inconsistent assessment HPS | An assessment has a missing, zero, negative, or invalid `totalItems` value. | Assessment percentages cannot be calculated reliably because the total possible score is invalid. | Validate the HPS before calculating percentages and quarantine assessments with invalid total item values. |
+| Missing assessment scores | No score record exists for a student in an existing assessment. | Missing scores may be incorrectly interpreted as missing data, affecting the accuracy of category calculations. | Apply the established grading rule by treating a missing score as zero while retaining the assessment HPS as the denominator. |
+| Transformation rerun produces inconsistent output | A previous batch is rerun without properly isolating its output files or records. | Results from different transformation runs may become mixed or overwritten, leading to inconsistent downstream data. | Use unique transformation run IDs and batch-specific output directories. Ensure reruns process the same source batch consistently. |
+| Late-arriving academic records | Student grades or assessment records are added or updated after the extraction batch has completed. | Newly available records may not appear in the current transformation results. | Reprocess an appropriate lookback window or manually trigger a new extraction and transformation run when updated source records become available. |
+| Unexpected source schema changes | MongoDB fields are renamed, removed, or changed to unexpected data types. | The transformation process may fail or produce incomplete results because expected fields are unavailable. | Validate required fields and data types before transformation. Stop processing affected records and log schema-related errors for investigation. |
+
+### 11.3 Problem Handling and Recovery
+
+When a transformation problem is detected, the pipeline must apply the appropriate handling procedure based on its severity and effect on academic results.
+
+| Problem Severity | Handling Procedure | Expected Result |
+|---|---|---|
+| Critical | Stop the affected processing operation, record the error, and prevent invalid results from proceeding to the next stage. | The affected batch is held or rejected until the issue is resolved. |
+| Warning | Record the issue and allow unaffected records to continue processing when safe. | Valid results are preserved while affected results are flagged for review. |
+| Incomplete Result | Mark the affected term result as incomplete and include the reason in the transformation output or review information. | The result requires further investigation before acceptance. |
+| Recoverable | Correct the underlying data or source issue and rerun the affected batch. | Corrected results are generated and validated again. |
+
+### 11.4 Logging and Monitoring
+
+Transformation problems must be recorded to support troubleshooting, monitoring, and future improvements.
+
+The pipeline uses the following records and storage locations:
+
+| Log or File | Purpose |
+|---|---|
+| `transformation_logs.jsonl` | Records transformation execution details, processing counts, validation results, warnings, and errors. |
+| `transformation_quarantine.jsonl` | Stores records rejected during transformation, including their associated reasons and error codes. |
+| `student_subject_results.json` | Stores generated student and subject performance results. |
+| `term_grade_results.json` | Stores calculated term results, including incomplete results that require further review. |
+| `excluded_records.json` | Stores records excluded from the transformation output and their corresponding reasons. |
+| `transformation_acceptance_logs.jsonl` | Records acceptance decisions, rejection rates, manual review information, and batch handover results. |
+
+These records help the ETL Developer or Data Engineer identify transformation problems, investigate affected academic records, and determine whether a batch is ready for the Load Stage.
+
+### 11.5 Mitigation Summary
+
+The Transformation Stage must prioritize data accuracy, consistency, and traceability. Invalid records must not silently enter academic performance calculations, while incomplete results must be identified and handled according to the established grading rules.
+
+Through validation checks, record quarantine, transformation logs, and manual review procedures, the pipeline can reduce inaccurate calculations and prevent unreliable academic results from proceeding to the Load Stage.
+
 
 

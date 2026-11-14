@@ -683,4 +683,133 @@ Non-critical warnings, including pending transmutation and incomplete Final Grad
 
 The expected outcome is a traceable validation process that confirms the reliability of available transformed data, identifies incomplete grading results, and supports controlled handover to the Supabase PostgreSQL loading stage.
 
+## 8. Transformation Metadata and Log Specification
+
+The EduLite Assessment Analytics ETL Pipeline records transformation metadata to monitor, trace, and audit each transformation batch run. The metadata captures the relationship between the extraction and transformation stages, batch information, processing counts, applied transformation rules, validation results, and execution details. These records are stored in `transformation_logs.jsonl`, with each line representing one transformation run.
+
+### 8.1 Transformation Metadata Specification
+
+The following table describes the metadata fields recorded during the Transformation Stage, including their purpose and example values.
+
+| Field | Purpose | Example Value |
+|---|---|---|
+| `run_id` | Unique identifier assigned to each transformation run. | `TRN_20261030_233929_f7316a0a` |
+| `parent_run_id` | References the extraction run associated with the transformation batch without duplicating its extraction metadata. | `EXT_20261029_0935` |
+| `batch_id` | Unique identifier assigned to the transformation batch. | `BATCH_95DFB474574E` |
+| `batch_window` | Records the date range covered by the data being processed. | `2026-08-05 to 2026-10-23` |
+| `table_name` | Identifies the source files used and the output files generated during transformation. | `students.json`, `assessments.json`, `student_subject_results.json` |
+| `start_time` | Records the date and time when the transformation process begins. | `2026-10-30T23:39:29.656741+00:00` |
+| `end_time` | Records the date and time when the transformation process finishes. | `2026-10-30T23:39:29.707452+00:00` |
+| `status` | Indicates the overall result of the transformation run. | `WARNING` |
+| `records_read` | Records the number of student-subject-term combinations processed by the transformation. | `144` |
+| `records_output` | Records the number of transformed term result records generated. | `144` |
+| `records_rejected` | Records the number of combinations excluded from transformation because of missing required identifiers. | `0` |
+| `rules_applied` | Tracks the number of times each transformation rule is applied or a calculation is performed. | `missing_score_defaulted_to_zero: 5` |
+| `validation_results` | Records the validation status, number of checks passed or failed, and individual validation results. | `SUCCESS`, 6 checks passed, 0 checks failed |
+| `error_message` | Stores the description of an error if the transformation process encounters a problem. | `null` |
+| `error_code` | Stores an identifier for the error encountered, if applicable. | `null` |
+| `duration_seconds` | Records the total time required to complete the transformation process in seconds. | `0.05` |
+| `code_version` | Identifies the version of the transformation code used for the batch run. | `1.0.0` |
+
+**Note:** The `rules_applied` field records rule application or calculation counts. These counts are not included in the reconciliation equation because a record can be affected by multiple rules while remaining part of the transformed output.
+
+The current implementation defines `records_read` as the number of student-subject-term combinations processed, rather than the total number of raw source records. Similarly, `records_rejected` counts combinations skipped because of missing required identifiers; it does not represent records rejected during the earlier Data Cleaning Stage.
+
+### 8.2 Transformation Log Specification
+
+The transformation metadata is stored in the `data/logs/transformation_logs.jsonl` file. Each transformation run produces a JSON log entry containing its metadata and execution results.
+
+The log follows this structure:
+
+```json
+{
+  "run_id": "TRN_20261030_233929_f7316a0a",
+  "parent_run_id": "EXT_20261029_0935",
+  "batch_id": "BATCH_95DFB474574E",
+  "batch_window": {
+    "start_date": "2026-08-05",
+    "end_date": "2026-10-23"
+  },
+  "table_name": {
+    "source": [
+      "sections.json",
+      "subjects.json",
+      "students.json",
+      "assessments.json",
+      "assessmentScores.json"
+    ],
+    "output": [
+      "student_subject_results.json",
+      "term_grade_results.json",
+      "excluded_records.json"
+    ]
+  },
+  "start_time": "2026-10-30T23:39:29.656741+00:00",
+  "end_time": "2026-10-30T23:39:29.707452+00:00",
+  "status": "WARNING",
+  "records_read": 144,
+  "records_output": 144,
+  "records_rejected": 0,
+  "rules_applied": {
+    "missing_score_defaulted_to_zero": 5,
+    "category_percentage_calculation": 10,
+    "written_work_weighted_calculation": 10
+  },
+  "validation_results": {
+    "status": "SUCCESS",
+    "checks_passed": 6,
+    "checks_failed": 0,
+    "checks": {
+      "student_results_generated": true,
+      "term_results_generated": true,
+      "excluded_records_generated": true,
+      "term_results_have_required_fields": true,
+      "term_result_count_reconciled": true,
+      "output_files_exist": true
+    },
+    "incomplete_term_results": 144
+  },
+  "error_message": null,
+  "error_code": null,
+  "duration_seconds": 0.05,
+  "code_version": "1.0.0"
+}
+```
+
+### 8.3 Record Reconciliation
+
+Record reconciliation is used to compare the number of records processed, generated, and rejected during transformation. The pipeline follows this equation:
+
+$$
+\text{Records Read} = \text{Records Output} + \text{Records Rejected}
+$$
+
+Based on the sample transformation log:
+
+| Record Count | Value |
+|---|---:|
+| Records Read | 144 |
+| Records Output | 144 |
+| Records Rejected | 0 |
+| **Total Accounted Records** | **144** |
+
+The record counts are reconciled because all 144 processed combinations are accounted for in the generated output, with none rejected. Records modified by transformation rules remain included in the output count and are not treated as rejected records.
+
+### 8.4 Use of Transformation Metadata and Logs
+
+The transformation metadata and logs support the monitoring, troubleshooting, auditing, data lineage, and recovery of the ETL pipeline.
+
+- **Monitoring:** The logs allow the pipeline to track each transformation run by recording its execution status, processing counts, timestamps, and duration. This helps determine whether a batch completed successfully or requires attention.
+
+- **Troubleshooting:** The recorded validation results, applied transformation rules, and error messages help identify problems during processing. For example, the logs can be reviewed to determine whether missing assessment data affects the generation of student performance results.
+
+- **Auditing:** The logs provide a record of each transformation run, including the code version, processing counts, and validation results. This allows previous executions to be reviewed and checked.
+
+- **Data Lineage:** The `parent_run_id` links each transformation batch to its corresponding extraction run. Together with the source and output file names, this helps trace where the transformed data originated and which files were generated.
+
+- **Recovery:** If a transformation run fails, its status, error information, and execution details can be reviewed to identify the cause. The pipeline can then be executed again using the available extracted and cleaned data after the problem has been corrected.
+
+**Implementation Note:** The current transformation log shows a `WARNING` status because the generated term results are incomplete. This is expected with the current dataset because assessment data and grades are not yet available for all assessment categories. The transformation process can still generate results using the available data, while the missing categories remain incomplete until corresponding assessment records and grades are provided.
+
+
 

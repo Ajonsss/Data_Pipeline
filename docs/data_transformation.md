@@ -812,4 +812,196 @@ The transformation metadata and logs support the monitoring, troubleshooting, au
 **Implementation Note:** The current transformation log shows a `WARNING` status because the generated term results are incomplete. This is expected with the current dataset because assessment data and grades are not yet available for all assessment categories. The transformation process can still generate results using the available data, while the missing categories remain incomplete until corresponding assessment records and grades are provided.
 
 
+## 9. Log Retention, Rejected Data, and Access
+
+### 9.1 Log Retention Period and Justification
+
+The EduLITE Assessment Analytics ETL Pipeline follows a **90-day file-based retention period** for operational logs, cleaning rejected-record logs, transformation quarantine files, and supporting data quality reports. This period provides sufficient time to monitor pipeline execution, investigate errors, review data quality issues, and troubleshoot problems from previous pipeline runs.
+
+Files become eligible for archiving and deletion when their last-modified timestamps are older than 90 days. The retention process evaluates the age of each file rather than the timestamps of individual records stored within the file. Therefore, frequently updated log files may contain entries older than 90 days.
+
+Files required for troubleshooting, auditing, or recovery should not be deleted prematurely. To address this requirement, the pipeline provides a retention hold mechanism that temporarily prevents the retention process from archiving or deleting eligible files.
+
+The retention process operates in dry-run mode by default. Actual archiving and deletion must be explicitly initiated by the authorized pipeline developer or maintainer.
+
+### 9.2 Storage Location of Logs
+
+The pipeline stores operational logs and supporting records in the local `data` directory. Each ETL stage maintains separate files to support monitoring, troubleshooting, and traceability of pipeline activities.
+
+| Pipeline Stage | File Name | Storage Location | Purpose |
+|---|---|---|---|
+| Extraction | `extraction_logs.jsonl` | `data/logs/` | Records source retrieval, extraction counts, execution status, validation results, and extraction errors. |
+| Cleaning | `cleaning_logs.jsonl` | `data/logs/` | Records data cleaning activities, input and cleaned record counts, rejected record counts, and cleaning status. |
+| Cleaning | `rejected_records.jsonl` | `data/logs/` | Records identifiers, record indexes, and reasons for records rejected during cleaning. |
+| Profiling | `profiling_logs.jsonl` | `data/logs/` | Records profiling execution, total records profiled, and identified data quality issue categories. |
+| Profiling | `data_quality_issues.csv` | `data/profiling/` | Contains identified data quality issues, affected record counts, examples, and planned treatments. |
+| Transformation | `transformation_logs.jsonl` | `data/logs/` | Records transformation execution, batch metadata, applied rules, validation results, and errors. |
+| Transformation | `transformation_quarantine.jsonl` | `data/logs/` | Records transformation issues, including rejection reasons, timestamps, batch IDs, rule IDs, and record references. |
+| Transformation Validation | `transformation_validation_logs.jsonl` | `data/logs/` | Records validation checks, passed and failed results, critical failures, non-critical warnings, and overall validation status. |
+| Transformation | `excluded_records.json` | `data/transformed/` | Stores excluded transformation records and their corresponding exclusion reasons. |
+
+Each pipeline stage maintains its own records to support traceability and help identify where an error or data quality issue occurred.
+
+The `excluded_records.json` file is maintained as an active transformation output. It is excluded from the automatic archiving and deletion process implemented in the updated retention management script.
+
+Additionally, the retention configuration includes `data/logs/retention_test.jsonl`, which may be used as a temporary file when testing the retention process.
+
+### 9.3 Quarantine and Rejected Data Management
+
+Rejected and quarantined records are managed separately based on the ETL stage responsible for identifying the issue.
+
+**Cleaning Rejected Records**
+
+Records that fail cleaning validation are excluded from the cleaned output and recorded in `data/logs/rejected_records.jsonl`.
+
+These may include records with missing required values, invalid data types, duplicate identifiers, invalid numeric values, or broken references.
+
+Each rejection entry contains information such as the timestamp, collection name, record index, record identifier, rejection reasons, and action taken.
+
+The cleaning process records references and rejection reasons rather than copying complete student records into the rejection log.
+
+**Transformation Quarantine**
+
+Records that cannot safely proceed through transformation are documented in `data/logs/transformation_quarantine.jsonl`.
+
+Quarantine entries may be generated when the pipeline detects invalid assessment information, duplicate student-assessment scores, mismatched record ownership, or other conditions that prevent reliable grade calculations.
+
+Each quarantine entry contains a timestamp, batch ID, rule ID, rejection reason, and record reference. Additional details may be included when necessary to explain the issue.
+
+**Excluded Transformation Records**
+
+Student records, assigned subjects, or student-subject combinations excluded from transformation processing are recorded in `data/transformed/excluded_records.json`.
+
+These exclusions may result from missing student identifiers, unavailable assigned subjects, mismatched ownership, or students without assigned subjects.
+
+Each entry includes identifying references and an explanation of why the record was excluded.
+
+**Retention Treatment**
+
+Cleaning rejected-record logs and transformation quarantine files are included in the 90-day file-based retention policy. They are eligible for archiving and deletion when their last-modified timestamps exceed the retention period.
+
+The active `excluded_records.json` file is not included in automatic retention archiving and deletion.
+
+Sensitive student information should be minimized in operational logs and quarantine entries. Record references should be used instead of complete source records whenever possible.
+
+### 9.4 Access Permissions
+
+Access to pipeline logs, rejected records, quarantine files, and archives is intended to be limited to authorized personnel responsible for operating and maintaining the ETL pipeline.
+
+| Role | Read | Write | Delete |
+|---|---|---|---|
+| Authorized Pipeline Developer / Maintainer | Yes | Yes | Yes, following retention rules |
+| Unauthorized Users | No | No | No |
+
+The authorized pipeline developer or maintainer is responsible for reviewing logs, investigating rejected records, managing the retention process, and ensuring that files required for troubleshooting, auditing, or recovery are not deleted prematurely.
+
+Access restrictions are defined as an operational security policy.
+
+The current `retention_management.py` does not independently enforce user-level access permissions. Actual access control depends on the underlying operating system, file-system permissions, and administrative security settings.
+
+### 9.5 Archiving Requirements
+
+The retention management process archives eligible files into ZIP archives stored in `data/archive/`.
+
+Files become eligible for archiving when their last-modified timestamps are older than the configured 90-day retention period.
+
+When an eligible file is identified, the retention management script performs the following operations:
+
+1. Checks whether the file exists and exceeds the retention period.
+2. Creates a ZIP archive containing the original file.
+3. Uses the file's relative directory path and a timestamp in the archive filename to reduce filename conflicts and identify the archived source.
+4. Opens the created ZIP archive and checks its integrity.
+5. Verifies that the original filename exists inside the archive.
+6. Deletes the original file only after successful archive creation and verification.
+7. Records the operation's result through the script's logging output.
+
+For example, an archive may be named:
+
+`logs_transformation_logs.jsonl_20261107_214500.zip`
+
+If archive creation or verification fails, the original file is retained and the failure is reported.
+
+The script uses ZIP compression to reduce storage requirements and preserve copies of eligible files before removing their originals.
+
+Archive files remain stored in `data/archive/`. The current implementation does not define a separate expiration or automatic deletion period for these archives.
+
+### 9.6 Deletion Rules and Responsible Process
+
+The EduLITE ETL Pipeline follows controlled deletion rules to reduce the risk of accidental data loss.
+
+**Retention Eligibility**
+
+Files must exceed the configured 90-day retention period before becoming eligible for archiving and deletion.
+
+The retention period is calculated using the file's last-modified timestamp. Individual JSONL log entries are not evaluated separately.
+
+**Retention Hold**
+
+Files needed for troubleshooting, auditing, or recovery should be protected from premature deletion.
+
+A retention hold can be activated by creating the following file:
+
+`data/retention_hold.txt`
+
+While this file exists, the retention management script skips both archiving and deletion operations.
+
+The retention hold applies to the entire retention process rather than individual files.
+
+**Archive Verification Before Deletion**
+
+Original files are deleted only after the corresponding ZIP archives have been successfully created and verified.
+
+If archive creation or verification fails, the original file remains unchanged.
+
+**Protection of Active Data**
+
+Active raw, cleaned, and transformed datasets are excluded from the retention-managed file list.
+
+This includes `data/transformed/excluded_records.json`, which remains available as an active transformation output.
+
+**Responsible Personnel**
+
+The authorized pipeline developer or maintainer is responsible for initiating retention operations, reviewing eligible files, managing retention holds, and monitoring archive and deletion results.
+
+**Manual Execution**
+
+The retention process can be executed manually using the following commands from the pipeline project directory.
+
+Preview eligible files without archiving or deleting:
+
+```powershell
+uv run python src/pipeline/retention_management.py
+```
+
+Apply archiving and deletion to eligible files:
+
+```powershell
+uv run python src/pipeline/retention_management.py --apply
+```
+
+The first command uses dry-run mode and reports files eligible for retention processing without modifying them.
+
+The second command performs actual archiving and deletion, provided that no retention hold is active.
+
+The retention management script is currently executed manually. Automatic scheduling of the retention process has not been implemented in the provided code.
+
+### 9.7 Operational Logs and Audit Records
+
+Operational logs support monitoring, error investigation, troubleshooting, and traceability of pipeline activities.
+
+These logs may contain information such as execution timestamps, pipeline run IDs, batch IDs, record counts, validation results, applied rules, error messages, and processing durations.
+
+Operational logs included in the retention configuration follow the 90-day file-based retention policy.
+
+The transformation validation log also records critical failures and non-critical warnings. Critical validation failures prevent the validation flow from proceeding successfully, while non-critical warnings are recorded without automatically stopping the process.
+
+Audit records, if required by the project or institution, should be maintained separately from operational logs and may require a longer retention period.
+
+These records should preserve important information about pipeline execution, data changes, administrative activities, and other events required for accountability.
+
+The current implementation focuses on operational logging, rejected and quarantined data records, and file-based retention management.
+
+A separate audit-record storage and retention mechanism has not yet been implemented.
+
+
 
